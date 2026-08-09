@@ -1,0 +1,27 @@
+[project]
+name = "weathernext"
+version = "0.1.0"
+description = "15-day ensemble forecast TUI built on Google DeepMind's WeatherNext 2 ensemble via Open-Meteo"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pgeocode>=0.5.0",
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+weathernext = "weathernext.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
