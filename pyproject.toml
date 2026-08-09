@@ -1,5 +1,5 @@
 [project]
-name = "weathernext"
+name = "weatherodds"
 version = "0.1.0"
 description = "15-day ensemble forecast TUI built on Google DeepMind's WeatherNext 2 ensemble via Open-Meteo"
 readme = "README.md"
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-weathernext = "weathernext.cli:main"
+weatherodds = "weatherodds.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]

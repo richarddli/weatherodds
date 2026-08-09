@@ -1,10 +1,10 @@
-# weathernext
+# weatherodds
 
 A command-line tool that shows a 15-day weather forecast for any US zip code,
 built on Google DeepMind's WeatherNext 2 model.
 
 ```sh
-uv run weathernext 02492
+uv run weatherodds 02108
 ```
 
 ## The problem
@@ -50,11 +50,11 @@ request. The model updates twice a day.
 Requires [uv](https://docs.astral.sh/uv/). From this directory:
 
 ```sh
-uv run weathernext 02492              # 15-day forecast
-uv run weathernext 02492 --days 7     # shorter horizon
-uv run weathernext 02492 --units metric
-uv run weathernext 02492 --json       # machine-readable output
-uv run weathernext 02492 --no-ecmwf   # skip the second-model cross-check
+uv run weatherodds 02108              # 15-day forecast
+uv run weatherodds 02108 --days 7     # shorter horizon
+uv run weatherodds 02108 --units metric
+uv run weatherodds 02108 --json       # machine-readable output
+uv run weatherodds 02108 --no-ecmwf   # skip the second-model cross-check
 ```
 
 US 5-digit zip codes only.
@@ -65,7 +65,7 @@ US 5-digit zip codes only.
 uv run pytest
 ```
 
-Code lives in `src/weathernext/`: zip lookup, API fetch, the math that turns
+Code lives in `src/weatherodds/`: zip lookup, API fetch, the math that turns
 64 simulations into one row per day, and the table rendering.
 
 ## License

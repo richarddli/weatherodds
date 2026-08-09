@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from weathernext.summarize import (
+from weatherodds.summarize import (
     IMPERIAL,
     cross_check,
     day_slices,

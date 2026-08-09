@@ -1,4 +1,4 @@
-"""Command-line entry point for weathernext."""
+"""Command-line entry point for weatherodds."""
 
 from __future__ import annotations
 
@@ -26,13 +26,13 @@ def _days(value: str) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="weathernext",
+        prog="weatherodds",
         description=(
             "15-day ensemble forecast for a US zip code, summarizing Google "
             "DeepMind's WeatherNext 2 ensemble (via the free Open-Meteo API)."
         ),
     )
-    parser.add_argument("zip", help="5-digit US zip code, e.g. 02492")
+    parser.add_argument("zip", help="5-digit US zip code, e.g. 02108")
     parser.add_argument(
         "--days", type=_days, default=15, metavar="N", help="forecast days, 1-15 (default 15)"
     )
@@ -82,7 +82,7 @@ def run(argv: list[str] | None = None) -> int:
 
     ecmwf_note: str | None = None
     try:
-        with httpx.Client(headers={"User-Agent": "weathernext/0.1"}) as client:
+        with httpx.Client(headers={"User-Agent": "weatherodds/0.1"}) as client:
             primary = fetch.fetch_ensemble(
                 client, fetch.WEATHERNEXT, location.lat, location.lon, args.days, args.units
             )

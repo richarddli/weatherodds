@@ -39,7 +39,7 @@ def lookup(zip_code: str) -> Location:
     if not ZIP_RE.match(zip_code):
         raise GeocodeError(
             f"{zip_code!r} is not a 5-digit US zip code. "
-            "weathernext v1 supports US zip codes only (e.g. 02492)."
+            "weatherodds v1 supports US zip codes only (e.g. 02108)."
         )
 
     # Imported lazily: pgeocode pulls in pandas and may download the GeoNames
