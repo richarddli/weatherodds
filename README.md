@@ -7,6 +7,10 @@ built on Google DeepMind's WeatherNext 2 model.
 uv run weatherodds 02108
 ```
 
+![15-day weatherodds forecast for Boston, MA, showing daily high/low, rain
+probability dots, expected amount, wind, sky, and a confidence rating for
+each day](docs/weatherodds-boston.svg)
+
 ## The problem
 
 Most weather apps stop at 10 days, and — more importantly — they always show a
