@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install Python dependencies
+        run: uv sync --group dev
+
+      - name: Test Python implementation
+        run: uv run python -m pytest
+
+      - name: Verify Python conformance reference
+        run: uv run python conformance/dump_reference.py --check
+
+      - name: Test Swift core
+        run: swift test --package-path macos/WeatherOddsCore
+
+      - name: Verify Swift/Python conformance
+        run: >-
+          swift run --package-path macos/WeatherOddsCore
+          weatherodds-conformance --repo-root .
+
+      - name: Build macOS app and widget
+        run: >-
+          xcodebuild -project macos/WeatherOdds.xcodeproj
+          -scheme WeatherOdds
+          -destination 'platform=macOS'
+          CODE_SIGNING_ALLOWED=NO
+          build

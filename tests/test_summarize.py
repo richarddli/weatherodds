@@ -10,6 +10,7 @@ import pytest
 
 from weatherodds.summarize import (
     IMPERIAL,
+    METRIC,
     cross_check,
     day_slices,
     member_keys,
@@ -18,6 +19,7 @@ from weatherodds.summarize import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "weathernext_response.json"
+EDGE_FIXTURE = Path(__file__).parent / "fixtures" / "weathernext_edge_cases.json"
 
 
 @pytest.fixture
@@ -28,6 +30,11 @@ def hourly() -> dict:
 @pytest.fixture
 def days(hourly):
     return summarize(hourly, IMPERIAL)
+
+
+@pytest.fixture
+def edge_hourly() -> dict:
+    return json.loads(EDGE_FIXTURE.read_text())["hourly"]
 
 
 def test_member_keys_are_discovered_control_first(hourly):
@@ -130,3 +137,82 @@ def test_cross_check_disagreement_on_rain_probability_alone(hourly):
     # temps identical, but 75% vs 0% rain is well outside the 20pp window
     assert checked[0].ecmwf_agrees is False
     assert checked[1].ecmwf_agrees is True
+
+
+def test_edge_fixture_nulls_zero_step_day_and_missing_variables(edge_hourly):
+    days = summarize(edge_hourly, IMPERIAL)
+
+    # September 2 has timestamps but no finite temperature step, so it drops.
+    assert [day.date for day in days] == [
+        "2026-09-01",
+        "2026-09-03",
+        "2026-09-04",
+    ]
+    assert [day.steps for day in days] == [4, 4, 2]
+    assert [day.partial for day in days] == [False, False, True]
+
+    # One member is all-null on September 1. It is excluded from temperature
+    # statistics but retained in the ensemble denominator.
+    first = days[0]
+    assert first.high_median == pytest.approx(56.0)
+    assert first.high_p10 == pytest.approx(55.2)
+    assert first.high_p90 == pytest.approx(56.8)
+    assert first.members_total == 3
+
+    # The fixture omits every optional variable.
+    assert all(day.wind_median_max is None for day in days)
+    assert all(day.gusts_p90 is None for day in days)
+    assert all(day.cloud_cover is None for day in days)
+    assert all(day.sky == "—" for day in days)
+
+
+def test_edge_fixture_wet_threshold_equality_in_both_unit_systems(edge_hourly):
+    imperial = summarize(edge_hourly, IMPERIAL)[0]
+    metric = summarize(edge_hourly, METRIC)[0]
+
+    # Member totals are exactly 0.04 and 1.0; an all-null member is dry.
+    assert imperial.members_wet == 2
+    assert imperial.rain_probability == pytest.approx(2 / 3)
+    assert imperial.amount_median == pytest.approx(0.52)
+    assert metric.members_wet == 1
+    assert metric.rain_probability == pytest.approx(1 / 3)
+    assert metric.amount_median == pytest.approx(1.0)
+
+
+def test_max_days_applies_after_zero_step_days_are_dropped(edge_hourly):
+    days = summarize(edge_hourly, IMPERIAL, max_days=2)
+    assert [day.date for day in days] == ["2026-09-01", "2026-09-03"]
+
+
+def test_conformance_generator_covers_named_contract_and_raw_numbers():
+    from conformance.dump_reference import build
+
+    reference = build()
+    assert reference["schema_version"] == 1
+
+    cases = {case["name"]: case for case in reference["cases"]}
+    assert set(cases) == {
+        "baseline_imperial",
+        "baseline_metric",
+        "edge_cases_imperial",
+        "edge_cases_metric",
+        "edge_cases_max_days_2",
+        "cross_check_agrees",
+        "cross_check_disagrees",
+        "cross_check_date_absent",
+    }
+    assert cases["edge_cases_max_days_2"]["max_days"] == 2
+
+    # This is the raw result of 90.8 - 81.2, rather than a canonicalized 9.6.
+    raw_spread = cases["baseline_imperial"]["expected"][0]["spread"]
+    assert raw_spread == 9.599999999999994
+
+    missing = cases["cross_check_date_absent"]["expected"]
+    assert missing[0]["ecmwf_agrees"] is None
+    assert missing[1]["ecmwf_agrees"] is True
+
+
+def test_committed_conformance_reference_is_current():
+    from conformance.dump_reference import reference_is_current
+
+    assert reference_is_current()
