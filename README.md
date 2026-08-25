@@ -45,9 +45,10 @@ don't book the outdoor party on this yet."
 
 Forecast data comes from [Open-Meteo](https://open-meteo.com), a free weather
 API that serves Google's WeatherNext 2 model and ECMWF's forecasts. No account
-or API key needed (free for personal use). Zip codes are looked up offline, so
-your location isn't sent anywhere except as coordinates in the forecast
-request. The model updates twice a day.
+or API key is needed for personal, noncommercial use. The Python CLI looks up
+zip codes offline. The macOS widget resolves zip codes with Apple MapKit, then
+sends coordinates—not the zip code—to Open-Meteo. The model updates twice a
+day.
 
 ## Usage
 
@@ -63,14 +64,32 @@ uv run weatherodds 02108 --no-ecmwf   # skip the second-model cross-check
 
 US 5-digit zip codes only.
 
+## macOS widget
+
+The native macOS 26 widget lives in `macos/`. Open
+`macos/WeatherOdds.xcodeproj`, select the `WeatherOdds` scheme, and run the host
+app once. Then add Weather Odds from the macOS widget gallery and configure a
+zip code and units for each widget instance.
+
+Small, medium, large, and extra-large families show progressively more of the
+15-day forecast. Forecasts refresh through WidgetKit and fall back to the last
+good result for up to 48 hours when the primary model is temporarily
+unavailable.
+
 ## Development
 
 ```sh
-uv run pytest
+uv run python -m pytest
+uv run python conformance/dump_reference.py --check
+swift test --package-path macos/WeatherOddsCore
+swift run --package-path macos/WeatherOddsCore \
+  weatherodds-conformance --repo-root .
 ```
 
 Code lives in `src/weatherodds/`: zip lookup, API fetch, the math that turns
-64 simulations into one row per day, and the table rendering.
+64 simulations into one row per day, and the table rendering. The Swift core,
+widget extension, and host app live under `macos/`; shared fixtures in
+`tests/fixtures/` keep the Python and Swift aggregation results aligned.
 
 ## License
 
