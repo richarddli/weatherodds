@@ -1,0 +1,38 @@
+{
+  "fill": {
+    "solid": "srgb:0.98039,0.98039,0.96863,1.00000"
+  },
+  "groups": [
+    {
+      "name": "Ribbon",
+      "layers": [
+        {
+          "name": "Ribbon artwork",
+          "image-name": "ribbon.png",
+          "glass": false,
+          "position": {
+            "scale": 1.3,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      },
+      "specular": false
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}

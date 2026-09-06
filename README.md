@@ -1,15 +1,14 @@
-# weatherodds
+<img src="docs/weatherodds-icon.png" alt="WeatherOdds ribbon app icon" width="80" height="80">
 
-A command-line tool that shows a 15-day weather forecast for any US zip code,
-built on Google DeepMind's WeatherNext 2 model.
+# WeatherOdds
 
-```sh
-uv run weatherodds 02108
-```
+A macOS widget and command-line tool that show a 15-day weather forecast for
+any US zip code, built on Google DeepMind's WeatherNext 2 model. See expected
+temperatures, rain chances, and how much the forecast models agree.
 
-![15-day weatherodds forecast for Boston, MA, showing daily high/low, rain
-probability dots, expected amount, wind, sky, and a confidence rating for
-each day](docs/weatherodds-boston.svg)
+![WeatherOdds macOS widget showing Boston's 15-day temperature ribbon,
+P10–P90 ensemble range, rain-probability bars, and ECMWF disagreement
+markers](docs/weatherodds-widget.png)
 
 ## The problem
 
@@ -26,20 +25,26 @@ different estimate of the atmosphere right now. Where the simulations agree,
 the forecast is trustworthy. Where they scatter, the honest answer is "we
 don't know yet."
 
-This tool shows you that agreement instead of hiding it:
+The ribbon layouts make that uncertainty visible:
 
-- **High / Low** — the middle value across all 64 simulations.
-- **Rain dots** (`●●●··`) — how many of the simulations produce rain that
-  day. Three dots means roughly half of them do.
-- **Confidence** (`●●● high` / `●○○ low`) — how tightly the simulations
-  agree, cross-checked against a second, independent forecast model run by
-  the European weather agency (ECMWF). When two unrelated models tell the
-  same story, you can plan on it; when they disagree, check back in a day
-  or two.
+- **Daily temperature range** — a continuous ribbon between the median daily
+  low and high, with blue lows and orange highs.
+- **Ensemble range** — a pale band from the 10th-percentile low to the
+  90th-percentile high. A wider band means more uncertainty.
+- **Rain chance** — aligned probability bars on a consistent 0–100% scale,
+  with percentages shown for chances of at least 20%.
+- **ECMWF comparison** — separate markers show when the independent European
+  forecast differs. The temperature ribbon continues to show WeatherNext's
+  actual spread.
 
-So a line like `Sat · 79° · ●●··· · ●○○ low` reads as: "probably around 79
-with a chance of rain — but it's far out and the models haven't settled, so
-don't book the outdoor party on this yet."
+The orange-and-blue ribbon app icon echoes this chart, with a pale envelope
+around the expected temperature range.
+
+The CLI presents the same forecast as a table, using rain dots (`●●●··`) and
+confidence labels (`●●● high` / `●○○ low`). A line like
+`Sat · 79° · ●●··· · ●○○ low` reads as: "probably around 79 with a chance of
+rain — but it's far out and the models haven't settled, so don't book the
+outdoor party on this yet."
 
 ## Where the data comes from
 
