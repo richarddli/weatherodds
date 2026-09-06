@@ -90,9 +90,11 @@ You can also run the `WeatherOdds` scheme from Xcode while developing. The
 installed copy is independent of Xcode's build output.
 
 Small, medium, large, and extra-large families show progressively more of the
-15-day forecast. Forecasts refresh through WidgetKit and fall back to the last
-good result for up to 48 hours when the primary model is temporarily
-unavailable.
+15-day forecast. Forecasts are cached for six hours per zip code and unit
+choice. Reloads reuse fresh data without delaying its next scheduled refresh;
+changing configuration loads that location's matching cache or fetches it.
+WidgetKit schedules updates, and the widget falls back to the last good result
+for up to 48 hours when the primary model is temporarily unavailable.
 
 ## Development
 
