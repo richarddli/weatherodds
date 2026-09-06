@@ -7,11 +7,11 @@ struct ForecastHeaderView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.locationName ?? "Weather Odds")
-                    .font(.headline)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
                     .lineLimit(1)
                 Text("WeatherNext 2 ensemble")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.72))
                     .lineLimit(1)
             }
 
@@ -59,7 +59,7 @@ private struct StatusPill: View {
 
     var body: some View {
         Label(text, systemImage: systemImage)
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .lineLimit(1)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)

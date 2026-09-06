@@ -56,33 +56,13 @@ struct WeatherOddsWidgetView: View {
         case .systemSmall:
             SmallForecastView(entry: entry)
         case .systemMedium:
-            MultiDayForecastView(
-                entry: entry,
-                dayCount: 5,
-                columns: 5,
-                density: .compact
-            )
+            ForecastRibbonView(entry: entry, density: .compact)
         case .systemLarge:
-            MultiDayForecastView(
-                entry: entry,
-                dayCount: 10,
-                columns: 5,
-                density: .regular
-            )
+            ForecastRibbonView(entry: entry, density: .standard)
         case .systemExtraLarge:
-            MultiDayForecastView(
-                entry: entry,
-                dayCount: 15,
-                columns: 5,
-                density: .regular
-            )
+            ForecastRibbonView(entry: entry, density: .detailed)
         default:
-            MultiDayForecastView(
-                entry: entry,
-                dayCount: 5,
-                columns: 5,
-                density: .compact
-            )
+            ForecastRibbonView(entry: entry, density: .compact)
         }
     }
 }

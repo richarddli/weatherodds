@@ -128,7 +128,7 @@ struct WeatherEntry: TimelineEntry, Sendable {
                 partial: offset == 0,
                 rating: rating,
                 points: rating == "high" ? 2 : rating == "medium" ? 1 : 0,
-                ecmwfAgrees: rating == "high" ? true : nil
+                ecmwfAgrees: rating == "high" ? true : rating == "low" ? false : nil
             )
         }
 
