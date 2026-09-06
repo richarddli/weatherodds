@@ -66,10 +66,23 @@ US 5-digit zip codes only.
 
 ## macOS widget
 
-The native macOS 26 widget lives in `macos/`. Open
-`macos/WeatherOdds.xcodeproj`, select the `WeatherOdds` scheme, and run the host
-app once. Then add Weather Odds from the macOS widget gallery and configure a
-zip code and units for each widget instance.
+The native macOS 26 widget lives in `macos/`. To install a copy for everyday use,
+configure your development team for both targets in
+`macos/WeatherOdds.xcodeproj` and make sure its Apple Development signing
+identity is available in your keychain. Then run:
+
+```sh
+bash scripts/install-macos.sh
+```
+
+This builds with signing enabled, verifies the signatures and sandbox/network
+entitlements, installs in `~/Applications/WeatherOdds.app`, registers the
+widget, and opens the app to request a forecast reload. Add Weather Odds from
+the macOS widget gallery and configure a zip code and units for each instance.
+Run the same command to update the installation after changing the code.
+
+You can also run the `WeatherOdds` scheme from Xcode while developing. The
+installed copy is independent of Xcode's build output.
 
 Small, medium, large, and extra-large families show progressively more of the
 15-day forecast. Forecasts refresh through WidgetKit and fall back to the last
@@ -84,7 +97,16 @@ uv run python conformance/dump_reference.py --check
 swift test --package-path macos/WeatherOddsCore
 swift run --package-path macos/WeatherOddsCore \
   weatherodds-conformance --repo-root .
+bash scripts/verify-macos.sh
 ```
+
+The verification script and CI build without signing in
+`tmp/macos-verification`, removing the build's Launch Services registration
+on exit. Always use a separate `-derivedDataPath` for unsigned builds: using
+Xcode's default output can overwrite a running signed widget and prevent macOS
+from loading it.
+The installer uses `tmp/macos-install` and verifies its signed output before
+replacing the installed app.
 
 Code lives in `src/weatherodds/`: zip lookup, API fetch, the math that turns
 64 simulations into one row per day, and the table rendering. The Swift core,

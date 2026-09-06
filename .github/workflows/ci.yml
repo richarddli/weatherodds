@@ -29,9 +29,4 @@ jobs:
           weatherodds-conformance --repo-root .
 
       - name: Build macOS app and widget
-        run: >-
-          xcodebuild -project macos/WeatherOdds.xcodeproj
-          -scheme WeatherOdds
-          -destination 'platform=macOS'
-          CODE_SIGNING_ALLOWED=NO
-          build
+        run: bash scripts/verify-macos.sh
