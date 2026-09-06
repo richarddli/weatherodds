@@ -8,6 +8,36 @@ destination="$HOME/Applications/WeatherOdds.app"
 built_app="$build_root/Build/Products/Debug/WeatherOdds.app"
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
+stop_previous_processes() {
+  local pids status pid attempt remaining
+  # Match only this user's host and widget executables, including instances
+  # left running by earlier development installs.
+  if pids=$(pgrep -u "$(id -u)" -x 'WeatherOdds|WeatherOddsWidget'); then
+    for pid in $pids; do
+      # Exiting between discovery and signalling is harmless. The wait below
+      # still fails the installation if a process cannot be stopped.
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+  else
+    status=$?
+    [[ "$status" = 1 ]] && return 0
+    return "$status"
+  fi
+
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    remaining=false
+    for pid in $pids; do
+      if kill -0 "$pid" 2>/dev/null; then
+        remaining=true
+      fi
+    done
+    [[ "$remaining" = false ]] && return 0
+    sleep 0.1
+  done
+  printf 'Previous WeatherOdds processes did not exit; installation retained for recovery.\n' >&2
+  return 1
+}
+
 # Debug enables the host's existing reload-on-launch behavior. This is still
 # a fully signed build; unsigned verification uses a different directory.
 xcodebuild \
@@ -61,8 +91,11 @@ mv "$app" "$destination"
 
 "$lsregister" -f "$destination"
 pluginkit -a "$destination/Contents/PlugIns/WeatherOddsWidget.appex"
-# A previous host process may still be running; a new instance executes the
-# reload-on-launch hook against the newly installed widget.
-open -n "$destination"
+# Register the replacement before restarting its processes. A surviving
+# extension can archive the previous bundle version, which WidgetKit rejects
+# even when the forecast request succeeds. Relaunching the host then triggers
+# its reload hook with the new extension and avoids duplicate app instances.
+stop_previous_processes
+open "$destination"
 replacement_complete=true
 printf 'Installed signed widget: %s\n' "$destination"
