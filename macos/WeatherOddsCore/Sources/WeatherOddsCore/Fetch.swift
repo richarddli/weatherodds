@@ -71,6 +71,19 @@ public struct SummarizedEnsemble: Codable, Equatable, Sendable {
     }
 }
 
+/// Outcome of an optional model request. An absent summary degrades the
+/// forecast without failing it; `httpFailure` keeps the upstream's own retry
+/// guidance available to the caller's cooldown accounting.
+public struct OptionalEnsemble: Equatable, Sendable {
+    public let summary: SummarizedEnsemble?
+    public let httpFailure: UpstreamHTTPFailure?
+
+    public init(summary: SummarizedEnsemble?, httpFailure: UpstreamHTTPFailure? = nil) {
+        self.summary = summary
+        self.httpFailure = httpFailure
+    }
+}
+
 public enum FetchError: Error, Equatable, Sendable {
     case unsupportedUnits(String)
     case invalidRequest
@@ -78,6 +91,7 @@ public enum FetchError: Error, Equatable, Sendable {
     case invalidResponse(model: String)
     case invalidPayload(model: String)
     case apiError(model: String, reason: String)
+    case httpFailure(model: String, failure: UpstreamHTTPFailure)
     case missingMetadata(model: String, field: String)
     case missingHourlyData(model: String)
     case missingRequiredVariable(model: String, variable: String)
@@ -110,6 +124,9 @@ extension FetchError: LocalizedError {
             "\(model): response was not valid ensemble JSON."
         case .apiError(let model, let reason):
             "\(model): \(reason)"
+        case .httpFailure(let model, let failure):
+            "\(model): HTTP \(failure.statusCode)"
+                + (failure.reason.map { " (\($0))" } ?? "")
         case .missingMetadata(let model, let field):
             "\(model): response omitted \(field)."
         case .missingHourlyData(let model):
@@ -121,6 +138,15 @@ extension FetchError: LocalizedError {
         case .unitMismatch(let model, let variable, let expected, let actual):
             "\(model): \(variable) unit was \(actual ?? "missing"); expected \(expected)."
         }
+    }
+}
+
+extension FetchError {
+    /// HTTP status and retry headers, when this failure came from a response.
+    /// Callers use it to separate an upstream rate limit from other failures.
+    public var upstreamHTTPFailure: UpstreamHTTPFailure? {
+        guard case .httpFailure(_, let failure) = self else { return nil }
+        return failure
     }
 }
 
@@ -244,14 +270,24 @@ public struct EnsembleClient: Sendable {
             throw FetchError.invalidResponse(model: model)
         }
 
-        let payload: EnsemblePayload
-        do {
-            payload = try JSONDecoder().decode(EnsemblePayload.self, from: data)
-        } catch {
+        // Decode opportunistically: an error response may carry an Open-Meteo
+        // reason, a plain-text body, or nothing usable at all. Reporting the
+        // status and retry headers must not depend on the body parsing.
+        let decoded = try? JSONDecoder().decode(EnsemblePayload.self, from: data)
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw FetchError.httpFailure(
+                model: model,
+                failure: UpstreamHTTPFailure(
+                    statusCode: httpResponse.statusCode,
+                    retryAfterHeader: httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                    reason: decoded?.reason
+                )
+            )
+        }
+        guard let payload = decoded else {
             throw FetchError.invalidPayload(model: model)
         }
-
-        guard (200..<300).contains(httpResponse.statusCode), payload.error != true else {
+        guard payload.error != true else {
             throw FetchError.apiError(
                 model: model,
                 reason: payload.reason ?? "HTTP \(httpResponse.statusCode)"
@@ -315,26 +351,31 @@ public struct EnsembleClient: Sendable {
     }
 
     /// Best-effort variant used for optional secondary models. Cancellation
-    /// still aborts the caller, while transport and API failures degrade to nil.
+    /// still aborts the caller, while transport and API failures degrade to an
+    /// absent summary. The failure is still reported so an upstream rate limit
+    /// observed here is not lost when the primary model succeeded.
     public func fetchAndSummarizeIfAvailable(
         model: String,
         latitude: Double,
         longitude: Double,
         units: Units,
         maxDays: Int? = nil
-    ) async throws -> SummarizedEnsemble? {
+    ) async throws -> OptionalEnsemble {
         do {
-            return try await fetchAndSummarize(
+            return OptionalEnsemble(summary: try await fetchAndSummarize(
                 model: model,
                 latitude: latitude,
                 longitude: longitude,
                 units: units,
                 maxDays: maxDays
-            )
+            ))
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            return nil
+            return OptionalEnsemble(
+                summary: nil,
+                httpFailure: (error as? FetchError)?.upstreamHTTPFailure
+            )
         }
     }
 

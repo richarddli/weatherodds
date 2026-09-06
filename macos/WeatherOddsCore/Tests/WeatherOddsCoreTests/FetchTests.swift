@@ -143,10 +143,68 @@ struct FetchTests {
         #expect(result.summaries[0].gustsP90 == nil)
     }
 
-    @Test("API reason is retained for HTTP failures")
+    @Test("HTTP failures retain status and retry headers with or without JSON")
+    func httpFailureDetail() async throws {
+        let json = FetchTestLoader(
+            data: Data(#"{"error":true,"reason":"model unavailable"}"#.utf8),
+            statusCode: 503,
+            headerFields: ["Retry-After": "120"]
+        )
+        await #expect(throws: FetchError.httpFailure(
+            model: ecmwfModel,
+            failure: UpstreamHTTPFailure(
+                statusCode: 503,
+                retryAfterHeader: "120",
+                reason: "model unavailable"
+            )
+        )) {
+            try await EnsembleClient(loader: json).fetch(
+                model: ecmwfModel,
+                latitude: 42,
+                longitude: -71,
+                units: .imperial
+            )
+        }
+
+        // A rate-limited response is often plain text or an HTML error page.
+        // Losing the status and Retry-After to a decode failure would drop the
+        // only signal the shared cooldown has.
+        let text = FetchTestLoader(
+            data: Data("Too Many Requests".utf8),
+            statusCode: 429,
+            headerFields: ["Retry-After": "900"]
+        )
+        let error = await #expect(throws: FetchError.self) {
+            try await EnsembleClient(loader: text).fetch(
+                model: weatherNextModel,
+                latitude: 42,
+                longitude: -71,
+                units: .imperial
+            )
+        }
+        let failure = try #require(error?.upstreamHTTPFailure)
+        #expect(failure == UpstreamHTTPFailure(statusCode: 429, retryAfterHeader: "900"))
+        #expect(failure.isRateLimited)
+    }
+
+    @Test("A 200 response with an unusable body is a payload failure")
+    func successfulStatusWithBadBody() async throws {
+        let loader = FetchTestLoader(data: Data("not json".utf8), statusCode: 200)
+
+        await #expect(throws: FetchError.invalidPayload(model: weatherNextModel)) {
+            try await EnsembleClient(loader: loader).fetch(
+                model: weatherNextModel,
+                latitude: 42,
+                longitude: -71,
+                units: .imperial
+            )
+        }
+    }
+
+    @Test("A 200 response may still carry an Open-Meteo error reason")
     func apiErrorReason() async throws {
         let data = Data(#"{"error":true,"reason":"model unavailable"}"#.utf8)
-        let loader = FetchTestLoader(data: data, statusCode: 503)
+        let loader = FetchTestLoader(data: data, statusCode: 200)
 
         await #expect(throws: FetchError.apiError(
             model: ecmwfModel,
@@ -161,7 +219,7 @@ struct FetchTests {
         }
     }
 
-    @Test("Optional secondary fetch preserves cancellation but swallows other failures")
+    @Test("Optional secondary fetch preserves cancellation but degrades other failures")
     func optionalFetchPreservesCancellation() async throws {
         let cancellationClient = EnsembleClient(
             loader: ErroringFetchLoader(error: CancellationError())
@@ -179,14 +237,37 @@ struct FetchTests {
         let failingClient = EnsembleClient(
             loader: ErroringFetchLoader(error: URLError(.timedOut))
         )
-        let result = try await failingClient.fetchAndSummarizeIfAvailable(
+        let transport = try await failingClient.fetchAndSummarizeIfAvailable(
             model: ecmwfModel,
             latitude: 42,
             longitude: -71,
             units: .imperial,
             maxDays: 1
         )
-        #expect(result == nil)
+        #expect(transport.summary == nil)
+        #expect(transport.httpFailure == nil)
+    }
+
+    @Test("A rate-limited optional model degrades but still reports the 429")
+    func optionalFetchReportsRateLimit() async throws {
+        let loader = FetchTestLoader(
+            data: Data("Too Many Requests".utf8),
+            statusCode: 429,
+            headerFields: ["Retry-After": "60"]
+        )
+        let result = try await EnsembleClient(loader: loader).fetchAndSummarizeIfAvailable(
+            model: ecmwfModel,
+            latitude: 42,
+            longitude: -71,
+            units: .imperial,
+            maxDays: 1
+        )
+
+        #expect(result.summary == nil)
+        #expect(result.httpFailure == UpstreamHTTPFailure(
+            statusCode: 429,
+            retryAfterHeader: "60"
+        ))
     }
 
     @Test("Missing required data and malformed lengths are rejected")
@@ -237,11 +318,13 @@ struct FetchTests {
 private actor FetchTestLoader: ForecastDataLoading {
     private let responseData: Data
     private let statusCode: Int
+    private let headerFields: [String: String]
     private var requests: [URLRequest] = []
 
-    init(data: Data, statusCode: Int) {
+    init(data: Data, statusCode: Int, headerFields: [String: String] = [:]) {
         self.responseData = data
         self.statusCode = statusCode
+        self.headerFields = headerFields
     }
 
     func data(forForecastRequest request: URLRequest) async throws -> (Data, URLResponse) {
@@ -250,7 +333,10 @@ private actor FetchTestLoader: ForecastDataLoading {
             url: request.url!,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: ["Content-Type": "application/json"].merging(
+                headerFields,
+                uniquingKeysWith: { _, override in override }
+            )
         )!
         return (responseData, response)
     }

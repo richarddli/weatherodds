@@ -47,7 +47,7 @@ struct DurableCacheTests {
             try await cache.saveForecast(saved, for: zip, units: .imperial)
             let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
                 await calls.increment()
-                return refreshed
+                return ForecastRefreshResult(refreshed)
             }
             #expect(result == refreshed)
             #expect(await cache.loadForecast(for: zip, units: .imperial) == refreshed)
@@ -74,7 +74,7 @@ struct DurableCacheTests {
             )
             let result = try await cache.loadOrRefreshForecast(for: zip, units: units, at: now) {
                 await calls.increment()
-                return forecast
+                return ForecastRefreshResult(forecast)
             }
             #expect(result.zip == rawZip)
             #expect(result.unitName == units.name)
@@ -98,7 +98,7 @@ struct DurableCacheTests {
                     try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
                         await calls.increment()
                         try await Task.sleep(for: .milliseconds(50))
-                        return forecast
+                        return ForecastRefreshResult(forecast)
                     }
                 }
             }
@@ -111,22 +111,31 @@ struct DurableCacheTests {
     func failureDoesNotPoisonCache() async throws {
         let root = cacheTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cache = WeatherOddsCache(rootDirectory: root)
+        let cache = WeatherOddsCache(rootDirectory: root, retryPolicy: RetryPolicy(jitter: { 0 }))
         let zip = try USZipCode("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let stale = cacheTestForecast(
             zip: zip, location: cacheTestLocation(), fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
         )
         try await cache.saveForecast(stale, for: zip, units: .imperial)
-        await #expect(throws: RefreshTestError.unexpectedRequest) {
+
+        let failure = await #expect(throws: ForecastUnavailable.self) {
             try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
                 throw RefreshTestError.unexpectedRequest
             }
         }
+        #expect(failure?.reason == .transient)
+        #expect(failure?.nextAttempt == now.addingTimeInterval(RetryPolicy.baseDelay))
         #expect(await cache.loadForecast(for: zip, units: .imperial) == stale)
-        let refreshed = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
-        let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
-            refreshed
+
+        let retryAt = try #require(failure?.nextAttempt)
+        let refreshed = cacheTestForecast(
+            zip: zip, location: cacheTestLocation(), fetchedAt: retryAt
+        )
+        let result = try await cache.loadOrRefreshForecast(
+            for: zip, units: .imperial, at: retryAt
+        ) {
+            ForecastRefreshResult(refreshed)
         }
         #expect(result == refreshed)
     }
@@ -147,7 +156,7 @@ struct DurableCacheTests {
                 await calls.increment()
                 await gate.wait()
                 try Task.checkCancellation()
-                return forecast
+                return ForecastRefreshResult(forecast)
             }
         }
         await gate.waitUntilStarted()
@@ -155,7 +164,7 @@ struct DurableCacheTests {
         let second = Task {
             try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
                 await calls.increment()
-                return forecast
+                return ForecastRefreshResult(forecast)
             }
         }
         await gate.release()

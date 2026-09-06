@@ -45,10 +45,15 @@ enum WeatherOddsDiagnostics {
                 units: .imperial,
                 maxDays: ensembleForecastDays
             )
-            let checked = ecmwf.map {
+            let checked = ecmwf.summary.map {
                 crossCheck(primary.summaries, ecmwfDays: $0.summaries, units: .imperial)
             } ?? primary.summaries
-            print("ECMWF: \(ecmwf == nil ? "unavailable (allowed)" : "contributed")")
+            if let summary = ecmwf.summary {
+                print("ECMWF: contributed \(summary.summaries.count) days")
+            } else {
+                let detail = ecmwf.httpFailure.map { "HTTP \($0.statusCode)" } ?? "no response"
+                print("ECMWF: unavailable (allowed): \(detail)")
+            }
             print("result: success, \(checked.count) summarized days")
         } catch {
             let localized = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

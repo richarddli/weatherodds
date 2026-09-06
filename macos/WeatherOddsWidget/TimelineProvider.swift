@@ -165,6 +165,7 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
 
     private static let sharedCache = WeatherOddsCache()
     private let cache = Self.sharedCache
+    private let refresher = ForecastRefresher()
 
     func placeholder(in context: Context) -> WeatherEntry {
         .canned()
@@ -289,11 +290,18 @@ private extension WeatherTimelineProvider {
                     policy: .never
                 )
             } catch {
+                // MapKit geocoding is a different upstream, so it keeps its own
+                // delay while still respecting any Open-Meteo cooldown.
                 return failureTimeline(
                     at: now,
                     savedForecast: savedForecast,
                     unitChoice: unitChoice,
-                    message: "Location lookup is temporarily unavailable."
+                    message: "Location lookup is temporarily unavailable.",
+                    retryAt: max(
+                        now.addingTimeInterval(RetryPolicy.baseDelay),
+                        await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                            ?? .distantPast
+                    )
                 )
             }
         }
@@ -304,7 +312,7 @@ private extension WeatherTimelineProvider {
                 units: units,
                 at: now
             ) {
-                try await Self.refreshForecast(
+                try await refresher.refresh(
                     for: zip,
                     location: location,
                     units: units,
@@ -317,29 +325,57 @@ private extension WeatherTimelineProvider {
                 availability: .fresh,
                 units: unitChoice
             )
-            return successTimeline(from: entry, refreshAt: refreshed.nextRefreshDate)
+            // A rate limit reported by the optional model outlives this
+            // forecast's own deadline; waking before it expires would only be
+            // suppressed again.
+            let refreshAt = max(
+                refreshed.nextRefreshDate,
+                await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                    ?? .distantPast
+            )
+            return successTimeline(from: entry, refreshAt: refreshAt)
         } catch is CancellationError {
+            // Cancellation records no failure state, so it must not retry
+            // immediately either.
             return failureTimeline(
                 at: now,
                 savedForecast: savedForecast,
                 unitChoice: unitChoice,
-                message: "Forecast update was interrupted."
+                message: "Forecast update was interrupted.",
+                retryAt: max(
+                    now.addingTimeInterval(RetryPolicy.interruptedDelay),
+                    await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                        ?? .distantPast
+                )
+            )
+        } catch let unavailable as ForecastUnavailable {
+            return failureTimeline(
+                at: now,
+                savedForecast: savedForecast,
+                unitChoice: unitChoice,
+                message: "Forecast service is temporarily unavailable.",
+                retryAt: unavailable.nextAttempt
             )
         } catch {
             return failureTimeline(
                 at: now,
                 savedForecast: savedForecast,
                 unitChoice: unitChoice,
-                message: "Forecast service is temporarily unavailable."
+                message: "Forecast service is temporarily unavailable.",
+                retryAt: await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                    ?? now.addingTimeInterval(RetryPolicy.baseDelay)
             )
         }
     }
 
+    /// Retries are always requested as a WidgetKit reload date; the extension
+    /// never sleeps or loops waiting for `retryAt`.
     func failureTimeline(
         at now: Date,
         savedForecast: CachedForecast?,
         unitChoice: UnitChoice,
-        message: String
+        message: String,
+        retryAt: Date
     ) -> Timeline<WeatherEntry> {
         if let savedForecast, savedForecast.isUsableFallback(at: now) {
             let entry = WeatherEntry.cached(
@@ -348,7 +384,7 @@ private extension WeatherTimelineProvider {
                 availability: .stale,
                 units: unitChoice
             )
-            return successTimeline(from: entry, refreshAt: now.addingTimeInterval(60 * 60))
+            return successTimeline(from: entry, refreshAt: retryAt)
         }
 
         let entry = WeatherEntry.message(
@@ -356,7 +392,7 @@ private extension WeatherTimelineProvider {
             availability: .unavailable(message),
             units: unitChoice
         )
-        return Timeline(entries: [entry], policy: .after(now.addingTimeInterval(30 * 60)))
+        return Timeline(entries: [entry], policy: .after(retryAt))
     }
 
     func successTimeline(
@@ -384,47 +420,5 @@ private extension WeatherTimelineProvider {
             ))
         }
         return Timeline(entries: entries, policy: .after(refreshAt))
-    }
-
-    /// Implemented in terms of WeatherOddsCore's Open-Meteo client. Keeping
-    /// the adapter here makes the provider's retry and caching behavior
-    /// independent of the transport implementation.
-    static func refreshForecast(
-        for zip: USZipCode,
-        location: Location,
-        units: Units,
-        at now: Date
-    ) async throws -> CachedForecast {
-        let client = EnsembleClient()
-        async let weatherNext = client.fetchAndSummarize(
-            model: weatherNextModel,
-            latitude: location.latitude,
-            longitude: location.longitude,
-            units: units,
-            maxDays: ensembleForecastDays
-        )
-        async let optionalECMWF: SummarizedEnsemble? = try await client.fetchAndSummarizeIfAvailable(
-            model: ecmwfModel,
-            latitude: location.latitude,
-            longitude: location.longitude,
-            units: units,
-            maxDays: ensembleForecastDays
-        )
-
-        let (primary, ecmwf) = try await (weatherNext, optionalECMWF)
-        let summaries = ecmwf.map {
-            crossCheck(primary.summaries, ecmwfDays: $0.summaries, units: units)
-        } ?? primary.summaries
-
-        return CachedForecast(
-            zip: zip,
-            units: units,
-            location: location,
-            timeZoneIdentifier: primary.timezone,
-            utcOffsetSeconds: primary.utcOffsetSeconds,
-            fetchedAt: now,
-            summaries: summaries,
-            ecmwfContributed: ecmwf != nil
-        )
     }
 }

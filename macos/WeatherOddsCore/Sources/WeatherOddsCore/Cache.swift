@@ -135,14 +135,21 @@ public struct CachedForecast: Codable, Equatable, Sendable {
 /// The actor serializes writes from independently configured widget instances.
 /// Its root is injectable so tests and previews never touch production data.
 public actor WeatherOddsCache {
-    public nonisolated let rootDirectory: URL
-    private var refreshTasks: [URL: Task<CachedForecast, Error>] = [:]
+    /// Retry key shared by every configuration. An Open-Meteo rate limit is a
+    /// property of the caller, not of one ZIP or unit choice, so changing
+    /// configuration must not bypass it.
+    public static let rateLimitKey = "open-meteo"
 
-    public init(rootDirectory: URL) {
+    public nonisolated let rootDirectory: URL
+    private let retryPolicy: RetryPolicy
+    private var refreshTasks: [URL: Task<ForecastRefreshResult, Error>] = [:]
+
+    public init(rootDirectory: URL, retryPolicy: RetryPolicy = RetryPolicy()) {
         self.rootDirectory = rootDirectory
+        self.retryPolicy = retryPolicy
     }
 
-    public init() {
+    public init(retryPolicy: RetryPolicy = RetryPolicy()) {
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -151,6 +158,7 @@ public actor WeatherOddsCache {
             path: "WeatherOdds",
             directoryHint: .isDirectory
         )
+        self.retryPolicy = retryPolicy
     }
 
     public func loadLocation(for zip: USZipCode) -> CachedLocation? {
@@ -188,11 +196,16 @@ public actor WeatherOddsCache {
 
     /// Reuses a fresh durable forecast or shares one refresh among callers for
     /// the same ZIP and units. Widget providers must share this actor instance.
+    ///
+    /// This is the single gate in front of the network: a cooldown recorded by
+    /// an earlier failure suppresses the request even after the extension
+    /// restarts, and the thrown `ForecastUnavailable` carries the deadline the
+    /// caller should hand to WidgetKit.
     public func loadOrRefreshForecast(
         for zip: USZipCode,
         units: Units,
         at now: Date,
-        refresh: @escaping @Sendable () async throws -> CachedForecast
+        refresh: @escaping @Sendable () async throws -> ForecastRefreshResult
     ) async throws -> CachedForecast {
         try Task.checkCancellation()
         if let saved = loadForecast(for: zip, units: units), saved.isFresh(at: now) {
@@ -200,30 +213,152 @@ public actor WeatherOddsCache {
         }
 
         let key = forecastURL(for: zip, units: units)
-        let task: Task<CachedForecast, Error>
+        let task: Task<ForecastRefreshResult, Error>
         if let pending = refreshTasks[key] {
+            // Joining a request already in flight adds no upstream traffic.
             task = pending
         } else {
+            if let deadline = nextEligibleAttempt(for: zip, units: units, at: now) {
+                throw ForecastUnavailable(
+                    reason: .cooldown,
+                    nextAttempt: deadline,
+                    consecutiveFailures: retryState(for: zip, units: units)?
+                        .failureCount(at: now) ?? 0
+                )
+            }
             task = Task {
                 defer { refreshTasks[key] = nil }
-                let forecast = try await refresh()
-                // A failed disk write must not hide a successfully fetched
-                // forecast, but a response for another configuration is invalid.
                 do {
-                    try saveForecast(forecast, for: zip, units: units)
-                } catch let error as CacheError {
-                    throw error
-                } catch {}
-                return forecast
+                    let result = try await refresh()
+                    // A failed disk write must not hide a successfully fetched
+                    // forecast, but a response for another configuration is
+                    // invalid and is accounted for as a failure below.
+                    do {
+                        try saveForecast(result.forecast, for: zip, units: units)
+                    } catch let error as CacheError {
+                        throw error
+                    } catch {}
+                    recordSuccess(for: zip, units: units, rateLimit: result.rateLimit, at: now)
+                    return result
+                } catch is CancellationError {
+                    // An interrupted refresh says nothing about the upstream,
+                    // so it must not extend any backoff.
+                    throw CancellationError()
+                } catch {
+                    throw recordFailure(error, for: zip, units: units, at: now)
+                }
             }
             refreshTasks[key] = task
         }
 
         // Cancelling one widget request must not cancel a fetch shared by
         // another widget. The transport supplies its own bounded timeout.
-        let forecast = try await task.value
+        let result = try await task.value
         try Task.checkCancellation()
-        return forecast
+        return result.forecast
+    }
+
+    /// The latest cooldown deadline that applies to this configuration, or nil
+    /// when an upstream request is permitted now.
+    public func nextEligibleAttempt(for zip: USZipCode, units: Units, at now: Date) -> Date? {
+        [
+            retryState(for: zip, units: units)?.activeDeadline(at: now),
+            retryState(forKey: Self.rateLimitKey)?.activeDeadline(at: now),
+        ].compactMap { $0 }.max()
+    }
+
+    func retryState(for zip: USZipCode, units: Units) -> RetryState? {
+        retryState(forKey: retryKey(for: zip, units: units))
+    }
+
+    func retryState(forKey key: String) -> RetryState? {
+        guard let entry: RetryState = decode(from: retryStateURL(forKey: key)),
+              entry.schemaVersion == RetryState.currentSchemaVersion,
+              entry.key == key
+        else {
+            return nil
+        }
+        return entry
+    }
+
+    /// Clears the failure state a recovery invalidates. A completed request
+    /// also proves the caller is no longer rate limited, unless the optional
+    /// model just reported one of its own.
+    private func recordSuccess(
+        for zip: USZipCode,
+        units: Units,
+        rateLimit: UpstreamHTTPFailure?,
+        at now: Date
+    ) {
+        clearRetryState(forKey: retryKey(for: zip, units: units))
+        if let rateLimit {
+            _ = advanceRetryState(forKey: Self.rateLimitKey, httpFailure: rateLimit, at: now)
+        } else {
+            clearRetryState(forKey: Self.rateLimitKey)
+        }
+    }
+
+    private func recordFailure(
+        _ error: any Error,
+        for zip: USZipCode,
+        units: Units,
+        at now: Date
+    ) -> ForecastUnavailable {
+        let httpFailure = (error as? FetchError)?.upstreamHTTPFailure
+        let isRateLimited = httpFailure?.isRateLimited == true
+        let local = advanceRetryState(
+            forKey: retryKey(for: zip, units: units),
+            httpFailure: httpFailure,
+            at: now
+        )
+
+        var nextAttempt = local.nextAttemptAfter
+        if isRateLimited {
+            let shared = advanceRetryState(
+                forKey: Self.rateLimitKey,
+                httpFailure: httpFailure,
+                at: now
+            )
+            nextAttempt = max(nextAttempt, shared.nextAttemptAfter)
+        } else if let shared = retryState(forKey: Self.rateLimitKey)?.activeDeadline(at: now) {
+            nextAttempt = max(nextAttempt, shared)
+        }
+
+        return ForecastUnavailable(
+            reason: isRateLimited ? .rateLimited : .transient,
+            nextAttempt: nextAttempt,
+            consecutiveFailures: local.consecutiveFailures,
+            httpFailure: httpFailure,
+            message: (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        )
+    }
+
+    /// Extends one cooldown record by a single failure and persists it.
+    private func advanceRetryState(
+        forKey key: String,
+        httpFailure: UpstreamHTTPFailure?,
+        at now: Date
+    ) -> RetryState {
+        let failures = (retryState(forKey: key)?.failureCount(at: now) ?? 0) + 1
+        let state = RetryState(
+            key: key,
+            consecutiveFailures: failures,
+            recordedAt: now,
+            nextAttemptAfter: retryPolicy.nextAttempt(
+                at: now,
+                consecutiveFailures: failures,
+                httpFailure: httpFailure
+            )
+        )
+        // Best effort: a cooldown that cannot be written still applies for the
+        // lifetime of the timeline WidgetKit was just handed.
+        try? encode(state, to: retryStateURL(forKey: key))
+        return state
+    }
+
+    private func clearRetryState(forKey key: String) {
+        try? FileManager.default.removeItem(at: retryStateURL(forKey: key))
     }
 
     public func saveForecast(_ forecast: CachedForecast, for zip: USZipCode, units: Units) throws {
@@ -243,6 +378,14 @@ public actor WeatherOddsCache {
 
     public nonisolated func forecastURL(for zip: USZipCode, units: Units) -> URL {
         rootDirectory.appending(path: "\(zip.rawValue)-\(units.name)-forecast-v1.json")
+    }
+
+    nonisolated func retryKey(for zip: USZipCode, units: Units) -> String {
+        "\(zip.rawValue)-\(units.name)"
+    }
+
+    nonisolated func retryStateURL(forKey key: String) -> URL {
+        rootDirectory.appending(path: "\(key)-retry-v1.json")
     }
 
     private func decode<Value: Decodable>(from url: URL) -> Value? {
