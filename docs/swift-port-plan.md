@@ -281,12 +281,21 @@ app. The app and widget consume `WeatherOddsCore` as a local Swift package.
 - Normalize the zip by trimming whitespace, then require exactly five ASCII
   digits. Keep it as a string so leading zeroes survive.
 - Family content:
-  - Small: today's high/low and confidence as the hero, plus two compact days.
-  - Medium: five days.
-  - Large: ten days.
-  - Extra large: the full forecast, up to 15 days.
-- Encode confidence with text and shape (`●●●`, `●●○`, `●○○`), with color only
-  as reinforcement. Add explicit VoiceOver labels such as “high confidence.”
+  - Small: today's high/low and text confidence as the hero, plus two secondary
+    days reduced to weekday, weather symbol, high/low, and rain chance when it
+    is at least 20 percent.
+  - Medium: a five-day compact ribbon without a legend, temperature-axis labels,
+    or footer.
+  - Large: a ten-day standard ribbon with temperature-axis labels, a compact
+    legend, and attribution footer.
+  - Extra large: the detailed continuous ribbon for up to 15 days, with the
+    expanded legend and rain-probability explanation.
+- In every ribbon family, fill the median daily low-to-high range and surround
+  it with a lighter P10-to-P90 ensemble envelope that naturally widens as model
+  spread grows. Align rain-probability bars beneath it on a fixed
+  zero-to-100-percent scale and label only chances of at least 20 percent. Mark
+  ECMWF disagreement separately instead of artificially widening the data.
+  Add explicit VoiceOver labels for confidence and all daily chart values.
 - Show `WeatherNext only` for degraded data and `Updated N hours ago` for stale
   data. An unavailable view tells the user that no saved forecast exists.
 - Verify `fullColor`, `accented`, and `vibrant` rendering, removable backgrounds,
