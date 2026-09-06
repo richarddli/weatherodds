@@ -20,6 +20,7 @@ public struct CachedLocation: Codable, Equatable, Sendable {
 
 public struct CachedForecast: Codable, Equatable, Sendable {
     public static let currentSchemaVersion = 1
+    public static let refreshInterval: TimeInterval = 6 * 60 * 60
     public static let maximumFallbackAge: TimeInterval = 48 * 60 * 60
 
     public let schemaVersion: Int
@@ -76,6 +77,18 @@ public struct CachedForecast: Codable, Equatable, Sendable {
         )
     }
 
+    /// Reusing a forecast must not postpone the next network refresh.
+    public var nextRefreshDate: Date {
+        fetchedAt.addingTimeInterval(Self.refreshInterval)
+    }
+
+    public func isFresh(at now: Date) -> Bool {
+        // A future timestamp may come from a clock change. Refresh it instead
+        // of letting it suppress requests indefinitely.
+        now >= fetchedAt && now < nextRefreshDate
+            && summaries.contains { $0.date >= currentLocalDate(at: now) }
+    }
+
     /// Whether this entry may be shown after a failed primary refresh.
     public func isUsableFallback(
         at now: Date,
@@ -123,6 +136,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
 /// Its root is injectable so tests and previews never touch production data.
 public actor WeatherOddsCache {
     public nonisolated let rootDirectory: URL
+    private var refreshTasks: [URL: Task<CachedForecast, Error>] = [:]
 
     public init(rootDirectory: URL) {
         self.rootDirectory = rootDirectory
@@ -170,6 +184,46 @@ public actor WeatherOddsCache {
             return nil
         }
         return entry
+    }
+
+    /// Reuses a fresh durable forecast or shares one refresh among callers for
+    /// the same ZIP and units. Widget providers must share this actor instance.
+    public func loadOrRefreshForecast(
+        for zip: USZipCode,
+        units: Units,
+        at now: Date,
+        refresh: @escaping @Sendable () async throws -> CachedForecast
+    ) async throws -> CachedForecast {
+        try Task.checkCancellation()
+        if let saved = loadForecast(for: zip, units: units), saved.isFresh(at: now) {
+            return saved
+        }
+
+        let key = forecastURL(for: zip, units: units)
+        let task: Task<CachedForecast, Error>
+        if let pending = refreshTasks[key] {
+            task = pending
+        } else {
+            task = Task {
+                defer { refreshTasks[key] = nil }
+                let forecast = try await refresh()
+                // A failed disk write must not hide a successfully fetched
+                // forecast, but a response for another configuration is invalid.
+                do {
+                    try saveForecast(forecast, for: zip, units: units)
+                } catch let error as CacheError {
+                    throw error
+                } catch {}
+                return forecast
+            }
+            refreshTasks[key] = task
+        }
+
+        // Cancelling one widget request must not cancel a fetch shared by
+        // another widget. The transport supplies its own bounded timeout.
+        let forecast = try await task.value
+        try Task.checkCancellation()
+        return forecast
     }
 
     public func saveForecast(_ forecast: CachedForecast, for zip: USZipCode, units: Units) throws {

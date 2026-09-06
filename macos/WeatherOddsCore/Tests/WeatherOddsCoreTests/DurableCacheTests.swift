@@ -4,6 +4,168 @@ import Testing
 
 @Suite("Durable forecast cache")
 struct DurableCacheTests {
+    @Test("Repeated reloads and new cache instances reuse a forecast until its original deadline")
+    func freshForecastSkipsRefresh() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let zip = try USZipCode("02108")
+        let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let saved = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: fetchedAt)
+        try await WeatherOddsCache(rootDirectory: root).saveForecast(saved, for: zip, units: .imperial)
+
+        for age: TimeInterval in [0, 60, 5 * 60 * 60, 6 * 60 * 60 - 1] {
+            let cache = WeatherOddsCache(rootDirectory: root)
+            let result = try await cache.loadOrRefreshForecast(
+                for: zip, units: .imperial, at: fetchedAt.addingTimeInterval(age)
+            ) {
+                throw RefreshTestError.unexpectedRequest
+            }
+            #expect(result == saved)
+            #expect(result.nextRefreshDate == fetchedAt.addingTimeInterval(6 * 60 * 60))
+        }
+    }
+
+    @Test("Expired, future-dated, and past-days-only forecasts trigger a refresh")
+    func unusableForecastsRefresh() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let zip = try USZipCode("02108")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let refreshed = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+        let calls = RefreshCallCounter()
+
+        for (age, day): (TimeInterval, String) in [
+            (6 * 60 * 60, "2027-01-15"),
+            (-60, "2027-01-15"),
+            (60, "2027-01-14"),
+        ] {
+            let saved = cacheTestForecast(
+                zip: zip, location: cacheTestLocation(),
+                fetchedAt: now.addingTimeInterval(-age), day: day
+            )
+            try await cache.saveForecast(saved, for: zip, units: .imperial)
+            let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                await calls.increment()
+                return refreshed
+            }
+            #expect(result == refreshed)
+            #expect(await cache.loadForecast(for: zip, units: .imperial) == refreshed)
+        }
+        #expect(await calls.value == 3)
+    }
+
+    @Test("Changing ZIP or units fetches the matching configuration; switching back reuses it")
+    func configurationChanges() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let calls = RefreshCallCounter()
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        for (rawZip, units): (String, Units) in [
+            ("02108", .imperial), ("10001", .imperial), ("10001", .metric), ("02108", .imperial),
+        ] {
+            let zip = try USZipCode(rawZip)
+            let forecast = cacheTestForecast(
+                zip: zip,
+                location: Location(zip: rawZip, displayName: rawZip, latitude: 40, longitude: -74),
+                fetchedAt: now, units: units
+            )
+            let result = try await cache.loadOrRefreshForecast(for: zip, units: units, at: now) {
+                await calls.increment()
+                return forecast
+            }
+            #expect(result.zip == rawZip)
+            #expect(result.unitName == units.name)
+        }
+        #expect(await calls.value == 3)
+    }
+
+    @Test("Concurrent widgets share one refresh")
+    func concurrentRefreshes() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let calls = RefreshCallCounter()
+        let zip = try USZipCode("02108")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let forecast = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+
+        try await withThrowingTaskGroup(of: CachedForecast.self) { group in
+            for _ in 0..<10 {
+                group.addTask {
+                    try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                        await calls.increment()
+                        try await Task.sleep(for: .milliseconds(50))
+                        return forecast
+                    }
+                }
+            }
+            for try await result in group { #expect(result == forecast) }
+        }
+        #expect(await calls.value == 1)
+    }
+
+    @Test("A failed refresh preserves stale data and permits a later retry")
+    func failureDoesNotPoisonCache() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let zip = try USZipCode("02108")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let stale = cacheTestForecast(
+            zip: zip, location: cacheTestLocation(), fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
+        )
+        try await cache.saveForecast(stale, for: zip, units: .imperial)
+        await #expect(throws: RefreshTestError.unexpectedRequest) {
+            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                throw RefreshTestError.unexpectedRequest
+            }
+        }
+        #expect(await cache.loadForecast(for: zip, units: .imperial) == stale)
+        let refreshed = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+        let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            refreshed
+        }
+        #expect(result == refreshed)
+    }
+
+    @Test("Cancelling one widget leaves the shared refresh usable by another")
+    func cancelledWaiterDoesNotCancelRefresh() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let calls = RefreshCallCounter()
+        let gate = RefreshTestGate()
+        let zip = try USZipCode("02108")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let forecast = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+
+        let first = Task {
+            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                await calls.increment()
+                await gate.wait()
+                try Task.checkCancellation()
+                return forecast
+            }
+        }
+        await gate.waitUntilStarted()
+        first.cancel()
+        let second = Task {
+            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                await calls.increment()
+                return forecast
+            }
+        }
+        await gate.release()
+
+        await #expect(throws: CancellationError.self) { try await first.value }
+        #expect(try await second.value == forecast)
+        #expect(await calls.value == 1)
+        #expect(await cache.loadForecast(for: zip, units: .imperial) == forecast)
+    }
+
     @Test("Location and forecast entries round-trip under configuration keys")
     func roundTripAndKeySeparation() async throws {
         let root = cacheTestRoot()
@@ -163,11 +325,12 @@ private func cacheTestForecast(
     zip: USZipCode,
     location: Location,
     fetchedAt: Date = Date(timeIntervalSince1970: 1_800_000_000),
-    day: String = "2027-01-15"
+    day: String = "2027-01-15",
+    units: Units = .imperial
 ) -> CachedForecast {
     CachedForecast(
         zip: zip,
-        units: .imperial,
+        units: units,
         location: location,
         timeZoneIdentifier: "America/New_York",
         utcOffsetSeconds: -18_000,
@@ -175,6 +338,36 @@ private func cacheTestForecast(
         summaries: [cacheTestSummary(date: day)],
         ecmwfContributed: true
     )
+}
+
+private enum RefreshTestError: Error { case unexpectedRequest }
+
+private actor RefreshCallCounter {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+
+private actor RefreshTestGate {
+    private var pending: CheckedContinuation<Void, Never>?
+    private var observer: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation {
+            pending = $0
+            observer?.resume()
+            observer = nil
+        }
+    }
+
+    func waitUntilStarted() async {
+        if pending != nil { return }
+        await withCheckedContinuation { observer = $0 }
+    }
+
+    func release() {
+        pending?.resume()
+        pending = nil
+    }
 }
 
 private func cacheTestSummary(date: String) -> DaySummary {

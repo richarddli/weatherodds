@@ -163,7 +163,8 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
     typealias Entry = WeatherEntry
     typealias Intent = WeatherConfigurationIntent
 
-    private let cache = WeatherOddsCache()
+    private static let sharedCache = WeatherOddsCache()
+    private let cache = Self.sharedCache
 
     func placeholder(in context: Context) -> WeatherEntry {
         .canned()
@@ -298,20 +299,25 @@ private extension WeatherTimelineProvider {
         }
 
         do {
-            let refreshed = try await refreshForecast(
+            let refreshed = try await cache.loadOrRefreshForecast(
                 for: zip,
-                location: location,
                 units: units,
                 at: now
-            )
-            try? await cache.saveForecast(refreshed, for: zip, units: units)
+            ) {
+                try await Self.refreshForecast(
+                    for: zip,
+                    location: location,
+                    units: units,
+                    at: now
+                )
+            }
             let entry = WeatherEntry.cached(
                 refreshed,
                 at: now,
                 availability: .fresh,
                 units: unitChoice
             )
-            return successTimeline(from: entry, refreshAt: now.addingTimeInterval(6 * 60 * 60))
+            return successTimeline(from: entry, refreshAt: refreshed.nextRefreshDate)
         } catch is CancellationError {
             return failureTimeline(
                 at: now,
@@ -383,7 +389,7 @@ private extension WeatherTimelineProvider {
     /// Implemented in terms of WeatherOddsCore's Open-Meteo client. Keeping
     /// the adapter here makes the provider's retry and caching behavior
     /// independent of the transport implementation.
-    func refreshForecast(
+    static func refreshForecast(
         for zip: USZipCode,
         location: Location,
         units: Units,
