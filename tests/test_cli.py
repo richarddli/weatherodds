@@ -154,3 +154,8 @@ def test_the_table_renders_without_a_tty(upstream, capsys):
     out = capsys.readouterr().out
     assert "WeatherNext 2" in out
     assert "Confidence" in out
+    assert "(cached)" not in out
+
+    # The same run again, now served from cache, says so in the header.
+    assert cli.run(["02108", "--days", "3"]) == 0
+    assert "(cached)" in capsys.readouterr().out

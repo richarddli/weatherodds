@@ -306,7 +306,9 @@ class Session:
         """The active cooldown deadline, or None when a request is allowed."""
         if self.cache is None:
             return None
-        deadline = self.cache.active_cooldown(now=self.clock())
+        deadline = self.cache.active_cooldown(
+            now=self.clock(), max_cooldown=self.policy.max_cooldown
+        )
         return None if deadline is None else _utc(deadline)
 
     # --------------------------------------------------------------- private

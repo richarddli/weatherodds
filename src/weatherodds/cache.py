@@ -19,10 +19,11 @@ import os
 import re
 import sys
 import tempfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .retry import RetryPolicy, RetryState, UpstreamFailure
+from .retry import MAX_COOLDOWN, RetryPolicy, RetryState, UpstreamFailure
 
 # How long a forecast is reused without any request at all. Open-Meteo's
 # ensemble models publish twice a day, so six hours never skips more than the
@@ -136,8 +137,11 @@ class ForecastCache:
         try:
             raw = gzip.decompress(path.read_bytes()) if compressed else path.read_bytes()
             return json.loads(raw)
-        except (OSError, ValueError, EOFError):
-            # Missing, unreadable, truncated, or not JSON: all are misses.
+        except (OSError, ValueError, EOFError, zlib.error):
+            # Missing, unreadable, truncated, not JSON, or a gzip body damaged
+            # in place — which raises zlib.error rather than BadGzipFile — are
+            # all misses. Nothing a cache file contains may reach the caller as
+            # an exception.
             return None
 
     def _write(self, name: str, document: dict, *, compressed: bool = False) -> None:
@@ -253,10 +257,20 @@ class ForecastCache:
     def retry_state(self, key: str = RATE_LIMIT_KEY) -> RetryState | None:
         return RetryState.from_dict(self._read(self.cooldown_name(key)), key)
 
-    def active_cooldown(self, *, now: float, key: str = RATE_LIMIT_KEY) -> float | None:
-        """The deadline holding calls back, or None when a request is allowed."""
+    def active_cooldown(
+        self,
+        *,
+        now: float,
+        key: str = RATE_LIMIT_KEY,
+        max_cooldown: float = MAX_COOLDOWN,
+    ) -> float | None:
+        """The deadline holding calls back, or None when a request is allowed.
+
+        ``max_cooldown`` must match the policy that wrote the record, so a
+        caller with a longer cap is not let back on the wire early.
+        """
         state = self.retry_state(key)
-        return None if state is None else state.active_deadline(now)
+        return None if state is None else state.active_deadline(now, max_cooldown)
 
     def record_rate_limit(
         self,

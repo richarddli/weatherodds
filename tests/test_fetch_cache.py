@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import random
 
 import httpx
 import pytest
@@ -251,6 +252,27 @@ def test_corrupt_entries_are_misses(tmp_path, clock):
     assert len(upstream.meta_requests) == 2
 
 
+def test_a_damaged_gzip_body_never_escapes_as_an_exception(tmp_path, clock):
+    """Bit-rot inside the compressed body raises zlib.error, not BadGzipFile."""
+    cache = ForecastCache(tmp_path)
+    cache.store_forecast("abc123", make_payload(days=15), None, now=clock.time())
+    path = tmp_path / cache.forecast_name("abc123")
+    intact = path.read_bytes()
+
+    rng = random.Random(0)
+    misses = 0
+    for _ in range(60):
+        damaged = bytearray(intact)
+        index = rng.randrange(10, len(damaged) - 8)
+        damaged[index] ^= 1 << rng.randrange(8)
+        path.write_bytes(bytes(damaged))
+        # A flipped bit in the header's timestamp still decodes; anything else
+        # must come back as a miss rather than an exception.
+        misses += cache.load_forecast("abc123", now=clock.time()) is None
+
+    assert misses > 0
+
+
 def test_entry_from_another_schema_or_key_is_a_miss(tmp_path, clock):
     cache = ForecastCache(tmp_path)
     cache.store_forecast("abc123", make_payload(), None, now=clock.time())
@@ -430,6 +452,25 @@ def test_cooldown_is_capped(tmp_path, clock):
     assert excinfo.value.next_attempt.timestamp() == pytest.approx(
         clock.time() + policy.max_cooldown
     )
+
+
+def test_the_session_policy_sets_the_cooldown_cap(tmp_path, clock):
+    # A policy that permits a longer cooldown must not have its own record
+    # clamped back to the module default when it is read again.
+    policy = RetryPolicy(max_cooldown=12 * 3600)
+    upstream = Upstream(forecast=httpx.Response(429, headers={"Retry-After": "36000"}))
+    session = make_session(upstream, tmp_path, clock, policy=policy)
+
+    with pytest.raises(fetch.CooldownError) as excinfo:
+        get_forecast(session)
+    assert excinfo.value.next_attempt.timestamp() == pytest.approx(clock.time() + 36000)
+
+    clock.advance(8 * 3600)  # past the 6-hour default cap, inside this policy's
+    later = make_session(upstream, tmp_path, clock, policy=policy)
+    assert later.next_attempt() is not None
+    with pytest.raises(fetch.CooldownError):
+        get_forecast(later)
+    assert len(upstream.requests) == 1
 
 
 def test_a_cooldown_recorded_in_the_future_is_ignored(tmp_path, clock):
