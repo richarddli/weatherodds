@@ -54,6 +54,7 @@ class Report:
     grid_lon: float
     grid_distance: float
     timezone: str
+    # When the displayed data was fetched; older than `now` for a cached run.
     fetched_at: dt.datetime
     members: int
     model_run: dt.datetime | None
@@ -61,6 +62,11 @@ class Report:
     ecmwf_members: int | None = None
     ecmwf_run: dt.datetime | None = None
     ecmwf_note: str | None = None
+    # Current local time, used to mark today's row. Defaults to `fetched_at`.
+    now: dt.datetime | None = None
+    cached: bool = False
+    stale: bool = False
+    cache_note: str | None = None
     horizon: int = 15
 
 
@@ -160,7 +166,7 @@ def format_run(run: dt.datetime | None, with_date: bool = False) -> str:
 def render_table(console: Console, report: Report) -> None:
     units = report.units
     loc = report.location
-    today = report.fetched_at.date()
+    today = (report.now or report.fetched_at).date()
 
     console.print(
         Text.assemble(
@@ -179,7 +185,11 @@ def render_table(console: Console, report: Report) -> None:
         line += f" · ECMWF ENS {format_run(report.ecmwf_run)} ({report.ecmwf_members} members)"
     tzname = report.fetched_at.tzname() or ""
     line += f" · fetched {report.fetched_at:%H:%M} {tzname}".rstrip()
+    if report.cached:
+        line += " (cached)"
     console.print(line, style="dim")
+    if report.cache_note:
+        console.print(report.cache_note, style="yellow")
     if report.ecmwf_note:
         console.print(report.ecmwf_note, style="yellow")
     console.print()
@@ -333,6 +343,11 @@ def build_json(report: Report) -> dict:
             "note": report.ecmwf_note,
         },
         "fetched_at": report.fetched_at.isoformat(),
+        "cache": {
+            "cached": report.cached,
+            "stale": report.stale,
+            "note": report.cache_note,
+        },
         "days": days,
     }
     return payload
