@@ -65,9 +65,38 @@ uv run weatherodds 02108 --days 7     # shorter horizon
 uv run weatherodds 02108 --units metric
 uv run weatherodds 02108 --json       # machine-readable output
 uv run weatherodds 02108 --no-ecmwf   # skip the second-model cross-check
+uv run weatherodds 02108 --refresh    # ignore the cache and fetch again
 ```
 
 US 5-digit zip codes only.
+
+### Caching and rate limits
+
+A forecast is reused for six hours per model, location, horizon, and unit
+choice, together with the model run metadata fetched alongside it, so a repeat
+invocation inside that window makes no network requests at all. Entries live in
+`~/Library/Caches/weatherodds` (`$XDG_CACHE_HOME/weatherodds` elsewhere,
+overridable with `WEATHERODDS_CACHE_DIR`), are written atomically, and are safe
+to delete at any time.
+
+Failures are handled politely, and the budget is small because the CLI is
+interactive:
+
+- Timeouts and 5xx responses are retried at most three times per request, with
+  exponential backoff plus jitter (half a second, doubling, capped at eight)
+  and no more than twenty seconds of waiting in total. Ordinary 4xx responses
+  are not retried.
+- `Retry-After` is honored in both its forms — seconds and an HTTP date. A
+  delay of up to five seconds is waited out; anything longer becomes a
+  cooldown. A missing or malformed header falls back to the local backoff.
+- A rate-limited response is never retried in place. It records a cooldown
+  under the cache directory that survives restarts and suppresses every
+  Open-Meteo call — forecast and metadata — until its deadline, which starts at
+  one minute, doubles per consecutive rate-limited invocation, and is capped at
+  six hours. The CLI reports that deadline instead of sleeping through it.
+- When a refresh fails, a cached forecast up to 48 hours old that still covers
+  today is shown with a note saying so. `--refresh` skips that fallback; it
+  does not skip the cooldown.
 
 ## macOS widget
 
@@ -115,8 +144,9 @@ from loading it.
 The installer uses `tmp/macos-install` and verifies its signed output before
 replacing the installed app.
 
-Code lives in `src/weatherodds/`: zip lookup, API fetch, the math that turns
-64 simulations into one row per day, and the table rendering. The Swift core,
+Code lives in `src/weatherodds/`: zip lookup, API fetch, the forecast cache and
+retry policy behind it, the math that turns 64 simulations into one row per
+day, and the table rendering. The Swift core,
 widget extension, and host app live under `macos/`; shared fixtures in
 `tests/fixtures/` keep the Python and Swift aggregation results aligned.
 
