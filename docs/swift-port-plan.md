@@ -70,7 +70,8 @@ release validation work.
 - Persist locations and last-good forecasts in the widget extension's own
   Application Support container. Do not add an App Group.
 - Generate timeline entries only when the displayed day can change, and request
-  a fresh forecast every six hours. Use shorter retry policies after failures.
+  a fresh forecast every six hours. After a failure, persist a cooldown and back
+  off exponentially rather than reissuing requests on the next invocation.
 - Drive the port with Swift tests plus a whole-payload conformance executable;
   finish with real desktop-widget lifecycle and rendering tests.
 
@@ -236,6 +237,10 @@ app. The app and widget consume `WeatherOddsCore` as a local Swift package.
   two after the location is cached.
 - Use a standard `URLSession` with a six-second request timeout and eight-second
   resource timeout. Do not retry inline; WidgetKit schedules the next attempt.
+- Capture the HTTP status and `Retry-After` header before decoding the body, so
+  a rate-limit response that is not valid ensemble JSON still yields retry
+  guidance. Report an optional model's HTTP failure alongside its absent
+  summary instead of discarding it.
 - Assert that `hourly_units` matches the selected units when the field is
   present. Treat absent optional hourly variables as missing, but reject absent
   time, temperature, or precipitation data.
@@ -261,11 +266,38 @@ app. The app and widget consume `WeatherOddsCore` as a local Swift package.
   separate boolean so the degraded indicator can coexist with fresh or stale
   data.
 
+### Retry and cooldown policy
+
+- `Retry.swift` owns the policy; `Cache.swift` persists it. Every refresh entry
+  point passes through `loadOrRefreshForecast`, which reads the durable state
+  before issuing a request, so an early timeline invocation or a restarted
+  extension cannot bypass a cooldown.
+- Back off exponentially from 30 minutes, doubling per consecutive failure to a
+  six-hour cap. Jitter subtracts up to 20 percent, which keeps successive
+  delays ordered and never exceeds the cap.
+- Honor a valid `Retry-After` in preference to local backoff, in both the
+  delta-seconds and HTTP-date forms, including when it exceeds the six-hour cap.
+  Bound it at 24 hours. Treat an absent, malformed, zero, or elapsed value as
+  absent and fall back to local backoff.
+- Keep the HTTP 429 cooldown under a key shared by every configuration, so
+  changing zip or units cannot bypass it, and record it for either model's
+  request. A 429 received by the optional model outranks an unrelated primary
+  failure, so it is not discarded along with it.
+- Clear a configuration's backoff on recovery. A completed request also clears
+  the shared rate-limit state unless the optional model just reported a 429 of
+  its own. Cancellation and invalid configuration record nothing: neither is
+  evidence about the upstream.
+- Ignore a cooldown record written in the future and clamp a deadline further
+  out than 24 hours past its own timestamp, so a clock change cannot park the
+  widget indefinitely.
+
 ### Timeline and timezone policy
 
-- On success, request the next timeline after `now + 6 hours`.
-- On primary failure with a usable cache, request another timeline after
-  `now + 1 hour`. Without a usable cache, retry after `now + 30 minutes`.
+- On success, request the next timeline after `now + 6 hours`, or later if a
+  shared rate-limit cooldown outlives that deadline.
+- On failure, request the next timeline at the cooldown deadline the retry
+  policy just recorded, whether or not a usable cache is displayed. Never sleep
+  or loop inside the extension waiting for it.
 - Build a Gregorian `Calendar` from the API timezone identifier. Fall back to a
   fixed timezone from `utc_offset_seconds` only when the identifier is invalid.
 - Include a location-midnight entry only when midnight occurs before the next
@@ -358,22 +390,27 @@ prototype. Public distribution is not included in this estimate.
    spread-only confidence, a cached successful primary forecast, and recovery on
    the next complete refresh.
 6. Fail WeatherNext with a cache younger than 48 hours. Verify stale data and its
-   age remain visible and a one-hour retry is requested. If that cached result
-   lacked ECMWF, verify stale and degraded indicators appear together.
+   age remain visible and the retry is requested at the recorded cooldown. If
+   that cached result lacked ECMWF, verify stale and degraded indicators appear
+   together.
 7. Fail the initial WeatherNext request without a cache. Verify the unavailable
-   state and a 30-minute retry; then restore the network and verify recovery.
-8. Enter malformed and unknown zips. Verify malformed input starts no work,
+   state and a 30-minute retry, then that reloading before the deadline issues
+   no further requests; restore the network and verify recovery.
+8. Return HTTP 429 with a `Retry-After`. Verify no requests are made until it
+   elapses, including after changing zip or units and after relaunching the
+   extension.
+9. Enter malformed and unknown zips. Verify malformed input starts no work,
    unknown input produces an editable invalid-configuration state, and a MapKit
    service failure is not mislabeled as an invalid zip.
-9. Terminate and relaunch the app/extension after a successful fetch. Verify the
-   location and forecast survive process death without an App Group.
-10. Corrupt a cache file and simulate an interrupted cache write. Verify the
+10. Terminate and relaunch the app/extension after a successful fetch. Verify
+    the location and forecast survive process death without an App Group.
+11. Corrupt a cache file and simulate an interrupted cache write. Verify the
     corrupt entry is ignored and an existing last-good destination is not
     destroyed.
-11. Verify every family in full-color, accented, vibrant, light, dark, and
+12. Verify every family in full-color, accented, vibrant, light, dark, and
     increased-contrast appearances. Confirm confidence remains distinguishable
     without color and VoiceOver announces rating, staleness, and degraded state.
-12. Leave the widgets installed outside the debugger for at least 24 hours.
+13. Leave the widgets installed outside the debugger for at least 24 hours.
     Verify normal six-hour refreshes, location-midnight rollover, and recovery
     from a temporary network outage without excessive reload requests.
 
