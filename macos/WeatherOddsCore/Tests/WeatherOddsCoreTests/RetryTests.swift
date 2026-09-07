@@ -223,6 +223,9 @@ struct RetryCooldownTests {
             )
             let blocked = await suppressedRefresh(cache, zip: zip, units: units, at: now)
             #expect(blocked?.reason == .cooldown)
+            // The count belongs to the record that imposed the deadline, so a
+            // configuration that has never failed still reports the shared one.
+            #expect(blocked?.consecutiveFailures == 1)
         }
 
         // Recovery on one configuration clears the shared cooldown.

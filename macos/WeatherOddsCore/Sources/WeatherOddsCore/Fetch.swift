@@ -287,10 +287,11 @@ public struct EnsembleClient: Sendable {
         guard let payload = decoded else {
             throw FetchError.invalidPayload(model: model)
         }
+        // Non-2xx is already handled above, so the status adds nothing here.
         guard payload.error != true else {
             throw FetchError.apiError(
                 model: model,
-                reason: payload.reason ?? "HTTP \(httpResponse.statusCode)"
+                reason: payload.reason ?? "response reported an error without a reason."
             )
         }
 

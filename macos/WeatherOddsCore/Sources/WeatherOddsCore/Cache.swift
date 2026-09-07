@@ -218,12 +218,11 @@ public actor WeatherOddsCache {
             // Joining a request already in flight adds no upstream traffic.
             task = pending
         } else {
-            if let deadline = nextEligibleAttempt(for: zip, units: units, at: now) {
+            if let cooldown = activeCooldown(for: zip, units: units, at: now) {
                 throw ForecastUnavailable(
                     reason: .cooldown,
-                    nextAttempt: deadline,
-                    consecutiveFailures: retryState(for: zip, units: units)?
-                        .failureCount(at: now) ?? 0
+                    nextAttempt: cooldown.deadline,
+                    consecutiveFailures: cooldown.consecutiveFailures
                 )
             }
             task = Task {
@@ -261,10 +260,25 @@ public actor WeatherOddsCache {
     /// The latest cooldown deadline that applies to this configuration, or nil
     /// when an upstream request is permitted now.
     public func nextEligibleAttempt(for zip: USZipCode, units: Units, at now: Date) -> Date? {
+        activeCooldown(for: zip, units: units, at: now)?.deadline
+    }
+
+    /// The cooldown holding this configuration back, reported as one record so
+    /// the deadline and the failure count that produced it always agree.
+    func activeCooldown(
+        for zip: USZipCode,
+        units: Units,
+        at now: Date
+    ) -> (deadline: Date, consecutiveFailures: Int)? {
         [
-            retryState(for: zip, units: units)?.activeDeadline(at: now),
-            retryState(forKey: Self.rateLimitKey)?.activeDeadline(at: now),
-        ].compactMap { $0 }.max()
+            retryState(for: zip, units: units),
+            retryState(forKey: Self.rateLimitKey),
+        ]
+        .compactMap { state -> (deadline: Date, consecutiveFailures: Int)? in
+            guard let state, let deadline = state.activeDeadline(at: now) else { return nil }
+            return (deadline, state.failureCount(at: now))
+        }
+        .max { $0.deadline < $1.deadline }
     }
 
     func retryState(for zip: USZipCode, units: Units) -> RetryState? {

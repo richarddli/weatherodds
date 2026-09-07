@@ -164,8 +164,12 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
     typealias Intent = WeatherConfigurationIntent
 
     private static let sharedCache = WeatherOddsCache()
+    // WidgetKit rebuilds the provider for every request, including the ones
+    // that never fetch. The client owns a URLSession, so it is shared for the
+    // life of the extension rather than created and abandoned per request.
+    private static let sharedRefresher = ForecastRefresher()
     private let cache = Self.sharedCache
-    private let refresher = ForecastRefresher()
+    private let refresher = Self.sharedRefresher
 
     func placeholder(in context: Context) -> WeatherEntry {
         .canned()

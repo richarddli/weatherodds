@@ -217,6 +217,18 @@ struct FetchTests {
                 units: .imperial
             )
         }
+
+        // A 2xx status is no explanation, so it must not stand in for one.
+        let reasonless = FetchTestLoader(data: Data(#"{"error":true}"#.utf8), statusCode: 200)
+        let error = await #expect(throws: FetchError.self) {
+            try await EnsembleClient(loader: reasonless).fetch(
+                model: ecmwfModel,
+                latitude: 42,
+                longitude: -71,
+                units: .imperial
+            )
+        }
+        #expect(error?.errorDescription?.contains("HTTP 200") == false)
     }
 
     @Test("Optional secondary fetch preserves cancellation but degrades other failures")
