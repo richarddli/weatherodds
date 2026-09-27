@@ -7,6 +7,7 @@ struct ForecastHeaderView: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.locationName ?? "Weather Odds")
+                    .help(entry.locationName ?? "Weather Odds")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .lineLimit(1)
                 Text("WeatherNext 2 ensemble")

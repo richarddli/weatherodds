@@ -27,7 +27,7 @@ public struct ForecastRefresher: Sendable {
     }
 
     public func refresh(
-        for zip: USZipCode,
+        for locationID: LocationID,
         location: Location,
         units: Units,
         at now: Date
@@ -73,7 +73,7 @@ public struct ForecastRefresher: Sendable {
 
         return ForecastRefreshResult(
             CachedForecast(
-                zip: zip,
+                locationID: locationID,
                 units: units,
                 location: location,
                 timeZoneIdentifier: primary.timezone,

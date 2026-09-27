@@ -12,13 +12,13 @@ struct WeatherOddsWidgetView: View {
             case .unconfigured:
                 WidgetMessageView(
                     systemImage: "location.viewfinder",
-                    title: "Choose a zip code",
-                    message: "Edit this widget to enter a five-digit US zip code."
+                    title: "Choose a location",
+                    message: "Edit this widget to search for a city or postal code."
                 )
             case .invalidConfiguration(let message):
                 WidgetMessageView(
                     systemImage: "exclamationmark.circle",
-                    title: "Check the zip code",
+                    title: "Check the location",
                     message: message
                 )
             case .unavailable(let message):

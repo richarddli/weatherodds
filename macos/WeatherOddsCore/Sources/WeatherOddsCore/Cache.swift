@@ -1,30 +1,43 @@
 import Foundation
+import CryptoKit
 
 public struct CachedLocation: Codable, Equatable, Sendable {
+    // Keep the on-disk key so existing v1 ZIP caches remain readable.
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, location
+        case locationID = "zip"
+    }
+
     public static let currentSchemaVersion = 1
 
     public let schemaVersion: Int
-    public let zip: String
+    public let locationID: String
     public let location: Location
 
     public init(
         schemaVersion: Int = CachedLocation.currentSchemaVersion,
-        zip: String,
+        locationID: String,
         location: Location
     ) {
         self.schemaVersion = schemaVersion
-        self.zip = zip
+        self.locationID = locationID
         self.location = location
     }
 }
 
 public struct CachedForecast: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, unitName, location, timeZoneIdentifier, utcOffsetSeconds
+        case fetchedAt, summaries, ecmwfContributed
+        case locationID = "zip"
+    }
+
     public static let currentSchemaVersion = 1
     public static let refreshInterval: TimeInterval = 6 * 60 * 60
     public static let maximumFallbackAge: TimeInterval = 48 * 60 * 60
 
     public let schemaVersion: Int
-    public let zip: String
+    public let locationID: String
     public let unitName: String
     public let location: Location
     public let timeZoneIdentifier: String
@@ -35,7 +48,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
 
     public init(
         schemaVersion: Int = CachedForecast.currentSchemaVersion,
-        zip: String,
+        locationID: String,
         unitName: String,
         location: Location,
         timeZoneIdentifier: String,
@@ -45,7 +58,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
         ecmwfContributed: Bool
     ) {
         self.schemaVersion = schemaVersion
-        self.zip = zip
+        self.locationID = locationID
         self.unitName = unitName
         self.location = location
         self.timeZoneIdentifier = timeZoneIdentifier
@@ -56,7 +69,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
     }
 
     public init(
-        zip: USZipCode,
+        locationID: LocationID,
         units: Units,
         location: Location,
         timeZoneIdentifier: String,
@@ -66,7 +79,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
         ecmwfContributed: Bool
     ) {
         self.init(
-            zip: zip.rawValue,
+            locationID: locationID.rawValue,
             unitName: units.name,
             location: location,
             timeZoneIdentifier: timeZoneIdentifier,
@@ -136,7 +149,7 @@ public struct CachedForecast: Codable, Equatable, Sendable {
 /// Its root is injectable so tests and previews never touch production data.
 public actor WeatherOddsCache {
     /// Retry key shared by every configuration. An Open-Meteo rate limit is a
-    /// property of the caller, not of one ZIP or unit choice, so changing
+    /// property of the caller, not of one location or unit choice, so changing
     /// configuration must not bypass it.
     public static let rateLimitKey = "open-meteo"
 
@@ -161,33 +174,105 @@ public actor WeatherOddsCache {
         self.retryPolicy = retryPolicy
     }
 
-    public func loadLocation(for zip: USZipCode) -> CachedLocation? {
-        guard let entry: CachedLocation = decode(from: locationURL(for: zip)),
+    public func suggestedLocations() -> [Location] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: rootDirectory, includingPropertiesForKeys: nil
+        )) ?? []
+        return files.filter { $0.lastPathComponent.hasSuffix("-location-v1.json") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { url -> Location? in
+                guard let record: CachedLocation = decode(from: url),
+                      let id = try? LocationID(record.locationID)
+                else { return nil }
+                return loadLocation(for: id)?.location
+            }
+    }
+
+    public func loadSearch(query: String, at now: Date) -> [Location]? {
+        guard let saved: CachedSearch = decode(from: searchURL(query)),
+              saved.query == query,
+              saved.fetchedAt <= now,
+              now.timeIntervalSince(saved.fetchedAt) < 30 * 24 * 60 * 60
+        else { return nil }
+        return saved.locations
+    }
+
+    public func saveSearch(_ locations: [Location], query: String, at now: Date) throws {
+        try encode(CachedSearch(query: query, fetchedAt: now, locations: locations),
+                   to: searchURL(query))
+    }
+
+    private func searchURL(_ query: String) -> URL {
+        let hash = SHA256.hash(data: Data(query.utf8)).map { String(format: "%02x", $0) }.joined()
+        return rootDirectory.appending(path: "search-\(hash)-v1.json")
+    }
+
+    public func checkGeocodingCooldown(at now: Date) throws {
+        let active = [Self.rateLimitKey, "geocoding"].compactMap { key -> (RetryState, Date)? in
+            guard let state = retryState(forKey: key), let deadline = state.activeDeadline(at: now)
+            else { return nil }
+            return (state, deadline)
+        }.max { $0.1 < $1.1 }
+        if let (state, deadline) = active {
+            throw ForecastUnavailable(
+                reason: .cooldown, nextAttempt: deadline,
+                consecutiveFailures: state.failureCount(at: now),
+                message: "Location search can try again after \(deadline.formatted(date: .omitted, time: .standard))."
+            )
+        }
+    }
+
+    public func recordGeocodingSuccess() {
+        clearRetryState(forKey: "geocoding")
+    }
+
+    public func recordGeocodingFailure(_ error: any Error, at now: Date) {
+        if error is CancellationError { return }
+        if let error = error as? GeocodeError, error.isInvalidConfiguration { return }
+        let failure = (error as? FetchError)?.upstreamHTTPFailure
+        if failure?.isRateLimited == true {
+            _ = advanceRetryState(forKey: Self.rateLimitKey, httpFailure: failure, at: now)
+            return
+        }
+        // A person typing in the picker should recover quickly after a timeout.
+        // Background forecast backoff starts at 30 minutes, far too long here.
+        let failures = (retryState(forKey: "geocoding")?.failureCount(at: now) ?? 0) + 1
+        let backoff = min(2 * pow(2, Double(min(max(failures - 1, 0), 16))), 60)
+        let delay = RetryAfterHeader.delay(failure?.retryAfterHeader, at: now) ?? backoff
+        let state = RetryState(
+            key: "geocoding", consecutiveFailures: failures, recordedAt: now,
+            nextAttemptAfter: now.addingTimeInterval(min(delay, RetryPolicy.maximumRetryAfter))
+        )
+        try? encode(state, to: retryStateURL(forKey: "geocoding"))
+    }
+
+    public func loadLocation(for locationID: LocationID) -> CachedLocation? {
+        guard let entry: CachedLocation = decode(from: locationURL(for: locationID)),
               entry.schemaVersion == CachedLocation.currentSchemaVersion,
-              entry.zip == zip.rawValue,
-              entry.location.zip == zip.rawValue
+              entry.locationID == locationID.rawValue,
+              entry.location.id.rawValue == locationID.rawValue
         else {
             return nil
         }
         return entry
     }
 
-    public func saveLocation(_ location: Location, for zip: USZipCode) throws {
-        guard location.zip == zip.rawValue else {
+    public func saveLocation(_ location: Location, for locationID: LocationID) throws {
+        guard location.id.rawValue == locationID.rawValue else {
             throw CacheError.keyMismatch
         }
         try encode(
-            CachedLocation(zip: zip.rawValue, location: location),
-            to: locationURL(for: zip)
+            CachedLocation(locationID: locationID.rawValue, location: location),
+            to: locationURL(for: locationID)
         )
     }
 
-    public func loadForecast(for zip: USZipCode, units: Units) -> CachedForecast? {
-        guard let entry: CachedForecast = decode(from: forecastURL(for: zip, units: units)),
+    public func loadForecast(for locationID: LocationID, units: Units) -> CachedForecast? {
+        guard let entry: CachedForecast = decode(from: forecastURL(for: locationID, units: units)),
               entry.schemaVersion == CachedForecast.currentSchemaVersion,
-              entry.zip == zip.rawValue,
+              entry.locationID == locationID.rawValue,
               entry.unitName == units.name,
-              entry.location.zip == zip.rawValue
+              entry.location.id.rawValue == locationID.rawValue
         else {
             return nil
         }
@@ -195,30 +280,30 @@ public actor WeatherOddsCache {
     }
 
     /// Reuses a fresh durable forecast or shares one refresh among callers for
-    /// the same ZIP and units. Widget providers must share this actor instance.
+    /// the same location and units. Widget providers must share this actor instance.
     ///
     /// This is the single gate in front of the network: a cooldown recorded by
     /// an earlier failure suppresses the request even after the extension
     /// restarts, and the thrown `ForecastUnavailable` carries the deadline the
     /// caller should hand to WidgetKit.
     public func loadOrRefreshForecast(
-        for zip: USZipCode,
+        for locationID: LocationID,
         units: Units,
         at now: Date,
         refresh: @escaping @Sendable () async throws -> ForecastRefreshResult
     ) async throws -> CachedForecast {
         try Task.checkCancellation()
-        if let saved = loadForecast(for: zip, units: units), saved.isFresh(at: now) {
+        if let saved = loadForecast(for: locationID, units: units), saved.isFresh(at: now) {
             return saved
         }
 
-        let key = forecastURL(for: zip, units: units)
+        let key = forecastURL(for: locationID, units: units)
         let task: Task<ForecastRefreshResult, Error>
         if let pending = refreshTasks[key] {
             // Joining a request already in flight adds no upstream traffic.
             task = pending
         } else {
-            if let cooldown = activeCooldown(for: zip, units: units, at: now) {
+            if let cooldown = activeCooldown(for: locationID, units: units, at: now) {
                 throw ForecastUnavailable(
                     reason: .cooldown,
                     nextAttempt: cooldown.deadline,
@@ -233,18 +318,18 @@ public actor WeatherOddsCache {
                     // forecast, but a response for another configuration is
                     // invalid and is accounted for as a failure below.
                     do {
-                        try saveForecast(result.forecast, for: zip, units: units)
+                        try saveForecast(result.forecast, for: locationID, units: units)
                     } catch let error as CacheError {
                         throw error
                     } catch {}
-                    recordSuccess(for: zip, units: units, rateLimit: result.rateLimit, at: now)
+                    recordSuccess(for: locationID, units: units, rateLimit: result.rateLimit, at: now)
                     return result
                 } catch is CancellationError {
                     // An interrupted refresh says nothing about the upstream,
                     // so it must not extend any backoff.
                     throw CancellationError()
                 } catch {
-                    throw recordFailure(error, for: zip, units: units, at: now)
+                    throw recordFailure(error, for: locationID, units: units, at: now)
                 }
             }
             refreshTasks[key] = task
@@ -259,19 +344,19 @@ public actor WeatherOddsCache {
 
     /// The latest cooldown deadline that applies to this configuration, or nil
     /// when an upstream request is permitted now.
-    public func nextEligibleAttempt(for zip: USZipCode, units: Units, at now: Date) -> Date? {
-        activeCooldown(for: zip, units: units, at: now)?.deadline
+    public func nextEligibleAttempt(for locationID: LocationID, units: Units, at now: Date) -> Date? {
+        activeCooldown(for: locationID, units: units, at: now)?.deadline
     }
 
     /// The cooldown holding this configuration back, reported as one record so
     /// the deadline and the failure count that produced it always agree.
     func activeCooldown(
-        for zip: USZipCode,
+        for locationID: LocationID,
         units: Units,
         at now: Date
     ) -> (deadline: Date, consecutiveFailures: Int)? {
         [
-            retryState(for: zip, units: units),
+            retryState(for: locationID, units: units),
             retryState(forKey: Self.rateLimitKey),
         ]
         .compactMap { state -> (deadline: Date, consecutiveFailures: Int)? in
@@ -281,8 +366,8 @@ public actor WeatherOddsCache {
         .max { $0.deadline < $1.deadline }
     }
 
-    func retryState(for zip: USZipCode, units: Units) -> RetryState? {
-        retryState(forKey: retryKey(for: zip, units: units))
+    func retryState(for locationID: LocationID, units: Units) -> RetryState? {
+        retryState(forKey: retryKey(for: locationID, units: units))
     }
 
     func retryState(forKey key: String) -> RetryState? {
@@ -299,12 +384,12 @@ public actor WeatherOddsCache {
     /// also proves the caller is no longer rate limited, unless the optional
     /// model just reported one of its own.
     private func recordSuccess(
-        for zip: USZipCode,
+        for locationID: LocationID,
         units: Units,
         rateLimit: UpstreamHTTPFailure?,
         at now: Date
     ) {
-        clearRetryState(forKey: retryKey(for: zip, units: units))
+        clearRetryState(forKey: retryKey(for: locationID, units: units))
         if let rateLimit {
             _ = advanceRetryState(forKey: Self.rateLimitKey, httpFailure: rateLimit, at: now)
         } else {
@@ -314,14 +399,14 @@ public actor WeatherOddsCache {
 
     private func recordFailure(
         _ error: any Error,
-        for zip: USZipCode,
+        for locationID: LocationID,
         units: Units,
         at now: Date
     ) -> ForecastUnavailable {
         let httpFailure = (error as? FetchError)?.upstreamHTTPFailure
         let isRateLimited = httpFailure?.isRateLimited == true
         let local = advanceRetryState(
-            forKey: retryKey(for: zip, units: units),
+            forKey: retryKey(for: locationID, units: units),
             httpFailure: httpFailure,
             at: now
         )
@@ -375,27 +460,27 @@ public actor WeatherOddsCache {
         try? FileManager.default.removeItem(at: retryStateURL(forKey: key))
     }
 
-    public func saveForecast(_ forecast: CachedForecast, for zip: USZipCode, units: Units) throws {
-        guard forecast.zip == zip.rawValue,
-              forecast.location.zip == zip.rawValue,
+    public func saveForecast(_ forecast: CachedForecast, for locationID: LocationID, units: Units) throws {
+        guard forecast.locationID == locationID.rawValue,
+              forecast.location.id.rawValue == locationID.rawValue,
               forecast.unitName == units.name,
               forecast.schemaVersion == CachedForecast.currentSchemaVersion
         else {
             throw CacheError.keyMismatch
         }
-        try encode(forecast, to: forecastURL(for: zip, units: units))
+        try encode(forecast, to: forecastURL(for: locationID, units: units))
     }
 
-    public nonisolated func locationURL(for zip: USZipCode) -> URL {
-        rootDirectory.appending(path: "\(zip.rawValue)-location-v1.json")
+    public nonisolated func locationURL(for locationID: LocationID) -> URL {
+        rootDirectory.appending(path: "\(locationID.rawValue)-location-v1.json")
     }
 
-    public nonisolated func forecastURL(for zip: USZipCode, units: Units) -> URL {
-        rootDirectory.appending(path: "\(zip.rawValue)-\(units.name)-forecast-v1.json")
+    public nonisolated func forecastURL(for locationID: LocationID, units: Units) -> URL {
+        rootDirectory.appending(path: "\(locationID.rawValue)-\(units.name)-forecast-v1.json")
     }
 
-    nonisolated func retryKey(for zip: USZipCode, units: Units) -> String {
-        "\(zip.rawValue)-\(units.name)"
+    nonisolated func retryKey(for locationID: LocationID, units: Units) -> String {
+        "\(locationID.rawValue)-\(units.name)"
     }
 
     nonisolated func retryStateURL(forKey key: String) -> URL {
@@ -434,4 +519,10 @@ public actor WeatherOddsCache {
 
 public enum CacheError: Error, Equatable, Sendable {
     case keyMismatch
+}
+
+private struct CachedSearch: Codable {
+    let query: String
+    let fetchedAt: Date
+    let locations: [Location]
 }

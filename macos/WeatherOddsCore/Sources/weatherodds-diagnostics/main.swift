@@ -6,14 +6,26 @@ import WeatherOddsCore
 enum WeatherOddsDiagnostics {
     @MainActor
     static func main() async {
-        let rawZip = CommandLine.arguments.dropFirst().first ?? "02492"
+        let query = CommandLine.arguments.dropFirst().first ?? "02492"
+        let root = FileManager.default.temporaryDirectory.appending(path: "WeatherOddsDiagnostics-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
 
         do {
-            let zip = try USZipCode(rawZip)
-            print("zip: \(zip.rawValue)")
-
-            print("geocode: starting")
-            let location = try await USZipCodeGeocoder().location(for: zip.rawValue)
+            print("geocode: starting for \(query)")
+            let search = LocationSearch(cache: WeatherOddsCache(rootDirectory: root))
+            let location: Location
+            if let id = try? LocationID(query) {
+                location = try await search.location(for: id)
+            } else {
+                let candidates = try await search.search(query)
+                guard candidates.count == 1, let selected = candidates.first else {
+                    for candidate in candidates {
+                        print("candidate: \(candidate.id.rawValue) — \(candidate.displayName)")
+                    }
+                    throw GeocodeError.invalidLocation
+                }
+                location = selected
+            }
             print(
                 "geocode: \(location.displayName) "
                     + "(\(location.latitude), \(location.longitude))"

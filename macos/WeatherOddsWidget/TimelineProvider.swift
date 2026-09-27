@@ -163,12 +163,8 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
     typealias Entry = WeatherEntry
     typealias Intent = WeatherConfigurationIntent
 
-    private static let sharedCache = WeatherOddsCache()
-    // WidgetKit rebuilds the provider for every request, including the ones
-    // that never fetch. The client owns a URLSession, so it is shared for the
-    // life of the extension rather than created and abandoned per request.
     private static let sharedRefresher = ForecastRefresher()
-    private let cache = Self.sharedCache
+    private let cache = WidgetLocations.cache
     private let refresher = Self.sharedRefresher
 
     func placeholder(in context: Context) -> WeatherEntry {
@@ -180,33 +176,24 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
         in context: Context
     ) async -> WeatherEntry {
         let now = Date.now
-        guard let rawZip = configuration.zipCode,
-              !rawZip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return context.isPreview
-                ? .canned(at: now, units: configuration.effectiveUnits)
-                : .unconfigured(at: now, units: configuration.effectiveUnits)
-        }
-
-        let zip: USZipCode
+        let locationID: LocationID
         do {
-            zip = try USZipCode(rawZip)
-        } catch let error as GeocodeError {
+            guard let configured = try configuration.configuredLocationID() else {
+                return context.isPreview
+                    ? .canned(at: now, units: configuration.effectiveUnits)
+                    : .unconfigured(at: now, units: configuration.effectiveUnits)
+            }
+            locationID = configured
+        } catch {
             return .message(
                 at: now,
                 availability: .invalidConfiguration(error.localizedDescription),
                 units: configuration.effectiveUnits
             )
-        } catch {
-            return .message(
-                at: now,
-                availability: .invalidConfiguration("Enter a five-digit US zip code."),
-                units: configuration.effectiveUnits
-            )
         }
 
         if let saved = await cache.loadForecast(
-            for: zip,
+            for: locationID,
             units: configuration.effectiveUnits.coreUnits
         ) {
             return .cached(
@@ -224,19 +211,16 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
         in context: Context
     ) async -> Timeline<WeatherEntry> {
         let now = Date.now
-        guard let rawZip = configuration.zipCode,
-              !rawZip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            return Timeline(
-                entries: [.unconfigured(at: now, units: configuration.effectiveUnits)],
-                policy: .never
-            )
-        }
-
-        let zip: USZipCode
+        let locationID: LocationID
         do {
-            zip = try USZipCode(rawZip)
-        } catch let error as GeocodeError {
+            guard let configured = try configuration.configuredLocationID() else {
+                return Timeline(
+                    entries: [.unconfigured(at: now, units: configuration.effectiveUnits)],
+                    policy: .never
+                )
+            }
+            locationID = configured
+        } catch {
             return Timeline(
                 entries: [.message(
                     at: now,
@@ -245,20 +229,12 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
                 )],
                 policy: .never
             )
-        } catch {
-            return Timeline(
-                entries: [.message(
-                    at: now,
-                    availability: .invalidConfiguration("Enter a five-digit US zip code."),
-                    units: configuration.effectiveUnits
-                )],
-                policy: .never
-            )
         }
 
         return await refreshedTimeline(
             at: now,
-            zip: zip,
+            locationID: locationID,
+            selectedLocation: configuration.location?.place,
             unitChoice: configuration.effectiveUnits
         )
     }
@@ -267,14 +243,18 @@ struct WeatherTimelineProvider: AppIntentTimelineProvider {
 private extension WeatherTimelineProvider {
     func refreshedTimeline(
         at now: Date,
-        zip: USZipCode,
+        locationID: LocationID,
+        selectedLocation: Location?,
         unitChoice: UnitChoice
     ) async -> Timeline<WeatherEntry> {
         let units = unitChoice.coreUnits
-        let savedForecast = await cache.loadForecast(for: zip, units: units)
+        let savedForecast = await cache.loadForecast(for: locationID, units: units)
 
         let location: Location
-        if let savedLocation = await cache.loadLocation(for: zip)?.location {
+        if let selectedLocation, selectedLocation.id == locationID {
+            location = selectedLocation
+            try? await cache.saveLocation(location, for: locationID)
+        } else if let savedLocation = await cache.loadLocation(for: locationID)?.location {
             location = savedLocation
         } else if let savedForecast {
             // The forecast cache also owns a validated, Sendable location. It
@@ -282,8 +262,8 @@ private extension WeatherTimelineProvider {
             location = savedForecast.location
         } else {
             do {
-                location = try await USZipCodeGeocoder().location(for: zip.rawValue)
-                try? await cache.saveLocation(location, for: zip)
+                location = try await WidgetLocations.search.location(for: locationID)
+                try? await cache.saveLocation(location, for: locationID)
             } catch let error as GeocodeError where error.isInvalidConfiguration {
                 return Timeline(
                     entries: [.message(
@@ -293,9 +273,17 @@ private extension WeatherTimelineProvider {
                     )],
                     policy: .never
                 )
+            } catch let unavailable as ForecastUnavailable {
+                return failureTimeline(
+                    at: now,
+                    savedForecast: savedForecast,
+                    unitChoice: unitChoice,
+                    message: "Location lookup is temporarily unavailable.",
+                    retryAt: unavailable.nextAttempt
+                )
             } catch {
-                // MapKit geocoding is a different upstream, so it keeps its own
-                // delay while still respecting any Open-Meteo cooldown.
+                // Background lookups keep the widget's normal retry cadence;
+                // user-driven picker searches have a shorter transient delay.
                 return failureTimeline(
                     at: now,
                     savedForecast: savedForecast,
@@ -303,7 +291,7 @@ private extension WeatherTimelineProvider {
                     message: "Location lookup is temporarily unavailable.",
                     retryAt: max(
                         now.addingTimeInterval(RetryPolicy.baseDelay),
-                        await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                        await cache.nextEligibleAttempt(for: locationID, units: units, at: now)
                             ?? .distantPast
                     )
                 )
@@ -312,12 +300,12 @@ private extension WeatherTimelineProvider {
 
         do {
             let refreshed = try await cache.loadOrRefreshForecast(
-                for: zip,
+                for: locationID,
                 units: units,
                 at: now
             ) {
                 try await refresher.refresh(
-                    for: zip,
+                    for: locationID,
                     location: location,
                     units: units,
                     at: now
@@ -334,7 +322,7 @@ private extension WeatherTimelineProvider {
             // suppressed again.
             let refreshAt = max(
                 refreshed.nextRefreshDate,
-                await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                await cache.nextEligibleAttempt(for: locationID, units: units, at: now)
                     ?? .distantPast
             )
             return successTimeline(from: entry, refreshAt: refreshAt)
@@ -348,7 +336,7 @@ private extension WeatherTimelineProvider {
                 message: "Forecast update was interrupted.",
                 retryAt: max(
                     now.addingTimeInterval(RetryPolicy.interruptedDelay),
-                    await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                    await cache.nextEligibleAttempt(for: locationID, units: units, at: now)
                         ?? .distantPast
                 )
             )
@@ -366,7 +354,7 @@ private extension WeatherTimelineProvider {
                 savedForecast: savedForecast,
                 unitChoice: unitChoice,
                 message: "Forecast service is temporarily unavailable.",
-                retryAt: await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                retryAt: await cache.nextEligibleAttempt(for: locationID, units: units, at: now)
                     ?? now.addingTimeInterval(RetryPolicy.baseDelay)
             )
         }

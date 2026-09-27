@@ -2,8 +2,9 @@
 
 # WeatherOdds
 
-A macOS widget and command-line tool that show a 15-day weather forecast for
-any US zip code, built on Google DeepMind's WeatherNext 2 model. See expected
+A macOS widget and command-line tool that show a 15-day weather forecast,
+built on Google DeepMind's WeatherNext 2 model. Both the CLI and macOS widget support international
+cities and postal codes. See expected
 temperatures, rain chances, and how much the forecast models agree.
 
 ![WeatherOdds macOS widget showing Boston's 15-day temperature ribbon,
@@ -40,19 +41,26 @@ The ribbon layouts make that uncertainty visible:
 The orange-and-blue ribbon app icon echoes this chart, with a pale envelope
 around the expected temperature range.
 
-The CLI presents the same forecast as a table, using rain dots (`●●●··`) and
-confidence labels (`●●● high` / `●○○ low`). A line like
-`Sat · 79° · ●●··· · ●○○ low` reads as: "probably around 79 with a chance of
-rain — but it's far out and the models haven't settled, so don't book the
-outdoor party on this yet."
+The CLI presents the same forecast as a table with rain percentages, an explicit
+ECMWF check (`Agrees`, `Differs`, or `Unavailable`), and a separate overall
+confidence label (`High`, `Medium`, or `Low`). Rain is the share of ensemble
+members predicting at least 0.04 inches (1 mm in metric mode) that day, rounded
+to a whole percent. ECMWF agrees when median daily highs differ by no more than
+4°F (2.2°C) and rain probabilities differ by no more than 20 percentage points.
+Confidence combines WeatherNext's ensemble spread with ECMWF agreement when
+available, so agreement alone does not guarantee high confidence. `--no-ecmwf`
+omits the comparison column and uses ensemble spread alone. The JSON format
+continues to expose rain probability and the nullable `ecmwf_agrees` value.
 
 ## Where the data comes from
 
 Forecast data comes from [Open-Meteo](https://open-meteo.com), a free weather
 API that serves Google's WeatherNext 2 model and ECMWF's forecasts. No account
 or API key is needed for personal, noncommercial use. The Python CLI looks up
-zip codes offline. The macOS widget resolves zip codes with Apple MapKit, then
-sends coordinates—not the zip code—to Open-Meteo. The model updates twice a
+US ZIP codes offline (after an initial dataset download) and international
+locations through [Open-Meteo's GeoNames-based geocoder](https://open-meteo.com/en/docs/geocoding-api).
+The macOS widget uses the same international geocoder and resolves US ZIP codes
+with Apple MapKit. Both send coordinates to Open-Meteo for forecasts. The model updates twice a
 day.
 
 ## Usage
@@ -66,9 +74,28 @@ uv run weatherodds 02108 --units metric
 uv run weatherodds 02108 --json       # machine-readable output
 uv run weatherodds 02108 --no-ecmwf   # skip the second-model cross-check
 uv run weatherodds 02108 --refresh    # ignore the cache and fetch again
+uv run weatherodds "Brno, Czech Republic" --units metric
+uv run weatherodds Brno --country CZ --units metric
+uv run weatherodds "SW1A 1AA" --country GB
 ```
 
-US 5-digit zip codes only.
+Quote city names containing spaces or a country qualifier. `--country` accepts
+a two-letter country code, case-insensitively. Bare five-digit codes retain their
+US meaning; supply `--country` for international postal codes. Postal coverage
+depends on the geocoder. Units still default to imperial, regardless of location.
+
+City searches prefer exact names and populated places. If several cities match,
+the CLI lists candidates on stderr and exits without fetching a forecast. Narrow
+the search by country or choose the GeoNames ID shown beside a candidate:
+
+```sh
+uv run weatherodds --location-id 3078610 --units metric  # Brno
+```
+
+Forecast days use the destination's timezone. JSON location records include `id`,
+`country_code`, and optional `postal_code`; the existing `zip` field is retained
+for US ZIP lookups and is `null` for city searches. IDs are namespaced as
+`postal:US:02108` or `geonames:3078610`; `--location-id` takes the numeric GeoNames ID.
 
 ### Caching and rate limits
 
@@ -78,6 +105,11 @@ invocation inside that window makes no network requests at all. Entries live in
 `~/Library/Caches/weatherodds` (`$XDG_CACHE_HOME/weatherodds` elsewhere,
 overridable with `WEATHERODDS_CACHE_DIR`), are written atomically, and are safe
 to delete at any time.
+
+Successful international lookup results are cached for 30 days in the same
+directory, allowing repeat forecasts without a geocoding request. `--refresh`
+refreshes weather data while retaining the location lookup. Geocoding requests
+share the forecast client's retry budget and persistent rate-limit cooldown.
 
 Failures are handled politely, and the budget is small because the CLI is
 interactive:
@@ -91,7 +123,7 @@ interactive:
   cooldown. A missing or malformed header falls back to the local backoff.
 - A rate-limited response is never retried in place. It records a cooldown
   under the cache directory that survives restarts and suppresses every
-  Open-Meteo call — forecast and metadata — until its deadline, which starts at
+  Open-Meteo call — forecast, metadata, and geocoding — until its deadline, which starts at
   one minute, doubles per consecutive rate-limited invocation, and is capped at
   six hours. The CLI reports that deadline instead of sleeping through it.
 - When a refresh fails, a cached forecast up to 48 hours old that still covers
@@ -112,16 +144,25 @@ bash scripts/install-macos.sh
 This builds with signing enabled, verifies the signatures and sandbox/network
 entitlements, installs in `~/Applications/WeatherOdds.app`, registers the
 widget, and opens the app to request a forecast reload. Add Weather Odds from
-the macOS widget gallery and configure a zip code and units for each instance.
+the macOS widget gallery. Edit each widget, open **Location**, and search for a city or
+postal code—for example, `Brno, Czech Republic` or `02108`. Choose the matching
+city, region, and country, then set your preferred units.
 Run the same command to update the installation after changing the code.
 
 You can also run the `WeatherOdds` scheme from Xcode while developing. The
 installed copy is independent of Xcode's build output.
 
 Small, medium, large, and extra-large families show progressively more of the
-15-day forecast. Forecasts are cached for six hours per zip code and unit
+15-day forecast. Forecasts are cached for six hours per selected location and unit
 choice. Reloads reuse fresh data without delaying its next scheduled refresh;
 changing configuration loads that location's matching cache or fetches it.
+Existing ZIP-configured widgets retain their location and cached forecasts;
+selecting a location overrides the old ZIP setting. Selected places are stored
+with stable IDs and coordinates, so routine reloads need no geocoding request.
+City search results are cached for 30 days, and search rate limits apply to
+forecast requests too. Dates follow the destination timezone; units remain your
+choice regardless of the destination.
+
 WidgetKit schedules updates, and the widget falls back to the last good result
 for up to 48 hours when the primary model is temporarily unavailable.
 

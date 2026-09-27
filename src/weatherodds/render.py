@@ -12,11 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .geocode import Location
-from .summarize import IMPERIAL, DaySummary, Units
-
-FILLED = "●"
-EMPTY_RAIN = "·"
-EMPTY_CONF = "○"
+from .summarize import IMPERIAL, RAIN_PROB_TOLERANCE, DaySummary, Units
 
 # Warm scale for high temps, in °F; lows use the same colors, dimmed.
 TEMP_COLORS = ((50.0, "#6f9fd8"), (70.0, "#7fb87f"), (85.0, "#e0a33e"))
@@ -33,9 +29,9 @@ RAIN_EMPTY = "grey42"
 AMOUNT_COLOR = "#5f9fdd"
 
 CONFIDENCE = {
-    "high": (FILLED * 3, "green3"),
-    "medium": (FILLED * 2 + EMPTY_CONF, "yellow3"),
-    "low": (FILLED + EMPTY_CONF * 2, "red3"),
+    "high": "green3",
+    "medium": "yellow3",
+    "low": "red3",
 }
 
 SKY_STYLES = {"Sunny": "yellow", "Partly": "", "Cloudy": "dim"}
@@ -68,6 +64,8 @@ class Report:
     stale: bool = False
     cache_note: str | None = None
     horizon: int = 15
+    # An unavailable comparison still has a column; an explicitly disabled one does not.
+    ecmwf_enabled: bool = True
 
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +89,7 @@ def format_temp(value: float) -> str:
 
 def format_amount(day: DaySummary, units: Units) -> str:
     value = day.amount_median
-    # Below the 1-dot threshold the day reads as dry; an amount there is noise.
+    # Suppress conditional amounts when the rain chance is below 10%.
     if value is None or day.rain_dots == 0:
         return "—"
     if units is IMPERIAL:
@@ -114,14 +112,18 @@ def format_wind(day: DaySummary, units: Units) -> str:
 
 
 def rain_text(day: DaySummary) -> Text:
-    filled = day.rain_dots
-    text = Text()
-    if filled == 0:
-        return Text(EMPTY_RAIN * 5, style=RAIN_EMPTY)
-    text.append(FILLED * filled, style=RAIN_COLORS[filled])
-    if filled < 5:
-        text.append(EMPTY_RAIN * (5 - filled), style=RAIN_EMPTY)
-    return text
+    return Text(
+        f"{day.rain_probability:.0%}",
+        style=RAIN_COLORS.get(day.rain_dots, RAIN_EMPTY),
+    )
+
+
+def ecmwf_text(day: DaySummary) -> Text:
+    if day.ecmwf_agrees is True:
+        return Text("Agrees", style="green3")
+    if day.ecmwf_agrees is False:
+        return Text("Differs", style="yellow3")
+    return Text("Unavailable", style="dim")
 
 
 def day_text(day: DaySummary, today: dt.date) -> Text:
@@ -175,9 +177,11 @@ def render_table(console: Console, report: Report) -> None:
             (f"{report.horizon}-day ensemble forecast", "bold"),
         )
     )
+    label = f"{loc.name} {loc.postal_code}" if loc.postal_code else loc.name
     console.print(
-        f"{loc.name} {loc.zip} ({format_coords(report.grid_lat, report.grid_lon)} · "
-        f"grid point {report.grid_distance:.0f} {units.distance_label} away)"
+        f"{label} ({format_coords(report.grid_lat, report.grid_lon)} · "
+        f"grid point {report.grid_distance:.0f} {units.distance_label} away)",
+        markup=False,
     )
 
     line = f"Model run: {format_run(report.model_run, with_date=True)} ({report.members} members)"
@@ -204,14 +208,15 @@ def render_table(console: Console, report: Report) -> None:
     table.add_column("Day", justify="left", no_wrap=True)
     table.add_column("High", justify="right", no_wrap=True)
     table.add_column("Low", justify="right", no_wrap=True)
-    table.add_column("Rain", justify="left", no_wrap=True)
+    table.add_column("Rain", justify="right", no_wrap=True)
     table.add_column("Amount", justify="left", no_wrap=True)
     table.add_column("Wind", justify="right", no_wrap=True)
     table.add_column("Sky", justify="left", no_wrap=True)
+    if report.ecmwf_enabled:
+        table.add_column("ECMWF", justify="left", no_wrap=True)
     table.add_column("Confidence", justify="left", no_wrap=True)
 
     for day in report.days:
-        dots, color = CONFIDENCE[day.rating]
         amount = format_amount(day, units)
         row = [
             day_text(day, today),
@@ -221,8 +226,10 @@ def render_table(console: Console, report: Report) -> None:
             Text(amount, style=AMOUNT_COLOR if amount != "—" else RAIN_EMPTY),
             Text(format_wind(day, units)),
             Text(day.sky, style=SKY_STYLES.get(day.sky, "dim")),
-            Text(f"{dots} {day.rating}", style=color),
         ]
+        if report.ecmwf_enabled:
+            row.append(ecmwf_text(day))
+        row.append(Text(day.rating.capitalize(), style=CONFIDENCE[day.rating]))
         is_today = dt.date.fromisoformat(day.date) == today
         table.add_row(*row, style=TODAY_ROW_STYLE if is_today else None)
 
@@ -237,17 +244,25 @@ def render_table(console: Console, report: Report) -> None:
         f" High/Low are the median of the {report.members} ensemble members.", style="dim"
     )
     console.print(
-        f" Rain dots = share of members producing {threshold} that day "
-        "(1 dot ≈ 10–30%, 5 dots ≈",
+        f" Rain = share of members producing {threshold} that day (rounded to a whole percent).",
         style="dim",
     )
     console.print(
-        ' certain); Amount = median among the wet members ("if it rains, roughly how much").',
+        ' Amount = median among the wet members ("if it rains, roughly how much").',
         style="dim",
     )
-    if report.ecmwf_used:
+    if report.ecmwf_enabled:
         console.print(
-            " Confidence = ensemble spread + agreement with the independent ECMWF ensemble.",
+            f" ECMWF Agrees = median highs within {units.agree_temp:g}{units.temp_symbol} "
+            f"and rain chances within {RAIN_PROB_TOLERANCE * 100:g} percentage points.",
+            style="dim",
+        )
+        console.print(
+            " Differs = either threshold exceeded; Unavailable = no comparison for that day.",
+            style="dim",
+        )
+        console.print(
+            " Confidence = WeatherNext ensemble spread + ECMWF agreement where available.",
             style="dim",
         )
     else:
@@ -320,7 +335,10 @@ def build_json(report: Report) -> dict:
 
     payload = {
         "location": {
+            "id": report.location.id,
             "zip": report.location.zip,
+            "postal_code": report.location.postal_code,
+            "country_code": report.location.country_code,
             "name": report.location.name,
             "lat": round(report.location.lat, 4),
             "lon": round(report.location.lon, 4),
