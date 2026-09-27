@@ -11,7 +11,10 @@ import pytest
 
 from weatherodds import cli, fetch, geocode
 
-BOSTON = geocode.Location(zip="02108", name="Boston", lat=42.3583, lon=-71.0603)
+BOSTON = geocode.Location(
+    id="postal:US:02108", name="Boston", lat=42.3583, lon=-71.0603,
+    country_code="US", postal_code="02108",
+)
 
 
 def payload(days: int = 4, members: int = 3) -> dict:
@@ -42,9 +45,12 @@ class Upstream:
     def __init__(self, forecast=None) -> None:
         self.requests: list[httpx.Request] = []
         self.forecast = forecast
+        self.geocoding = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.host == "geocoding-api.open-meteo.com":
+            return httpx.Response(200, json=self.geocoding)
         if request.url.path.endswith("meta.json"):
             return httpx.Response(200, json={"last_run_initialisation_time": 1_700_000_000})
         if self.forecast is not None:
@@ -159,3 +165,146 @@ def test_the_table_renders_without_a_tty(upstream, capsys):
     # The same run again, now served from cache, says so in the header.
     assert cli.run(["02108", "--days", "3"]) == 0
     assert "(cached)" in capsys.readouterr().out
+
+
+BRNO_RESULT = {
+    "id": 3078610, "name": "Brno", "latitude": 49.19522, "longitude": 16.60796,
+    "country_code": "CZ", "country": "Czechia", "admin1": "South Moravian",
+    "timezone": "Europe/Prague", "feature_code": "PPLA",
+}
+
+
+def test_international_cli_and_repeat_cache(upstream, capsys):
+    upstream.geocoding = {"results": [BRNO_RESULT]}
+    argv = ["Brno", "--country", "cz", "--units", "metric", "--json"]
+    assert cli.run(argv) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["location"]["id"] == "geonames:3078610"
+    assert report["location"]["country_code"] == "CZ"
+    assert report["location"]["zip"] is None
+    assert report["location"]["postal_code"] is None
+    assert report["units"] == "metric"
+    assert "high_c" in report["days"][0]
+    forecast_request = next(r for r in upstream.requests if r.url.path == "/v1/ensemble")
+    assert forecast_request.url.params["latitude"] == "49.1952"
+    assert forecast_request.url.params["longitude"] == "16.6080"
+    assert forecast_request.url.params["timezone"] == "auto"
+    assert len(upstream.requests) == 5
+    assert cli.run(argv) == 0
+    assert json.loads(capsys.readouterr().out)["cache"]["cached"]
+    assert len(upstream.requests) == 5
+
+
+def test_qualified_city_table_and_id_selection(upstream, capsys):
+    upstream.geocoding = {"results": [BRNO_RESULT]}
+    assert cli.run(["Brno, Czech Republic", "--no-ecmwf"]) == 0
+    output = capsys.readouterr().out
+    assert "Brno, South Moravian, Czechia (" in output
+    assert "None" not in output
+    upstream.geocoding = BRNO_RESULT
+    assert cli.run(["--location-id", "3078610", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["location"]["id"] == "geonames:3078610"
+
+
+def test_ambiguity_stops_before_forecasting(upstream, capsys):
+    upstream.geocoding = {"results": [BRNO_RESULT, {**BRNO_RESULT, "id": 123}]}
+    assert cli.run(["Brno", "--json"]) == 1
+    output = capsys.readouterr()
+    assert not output.out
+    assert "Multiple locations" in output.err
+    assert "--location-id 3078610" in output.err
+    assert len(upstream.requests) == 1
+
+
+@pytest.mark.parametrize("argv", [[], ["Brno", "--location-id", "1"], ["--location-id", "0"]])
+def test_location_argument_validation(argv):
+    with pytest.raises(SystemExit) as error:
+        cli.run(argv)
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("month,day", [(3, 28), (10, 24)])
+def test_forecast_starts_on_prague_date_around_dst(upstream, capsys, monkeypatch, month, day):
+    instant = dt.datetime(2026, month, day, 23, 30, tzinfo=dt.timezone.utc)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz)
+
+    monkeypatch.setattr(dt, "datetime", FixedDateTime)
+    upstream.geocoding = {"results": [BRNO_RESULT]}
+    forecast = payload()
+    forecast.update(timezone="Europe/Prague", utc_offset_seconds=3600 if month == 3 else 7200)
+    upstream.forecast = httpx.Response(200, json=forecast)
+    assert cli.run(["Brno", "--json", "--days", "2"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["days"][0]["date"] == f"2026-{month:02d}-{day + 1:02d}"
+    assert len(report["days"]) == 2
+    assert report["location"]["timezone"] == "Europe/Prague"
+
+
+@pytest.mark.parametrize("units", ["imperial", "metric"])
+def test_table_shows_rain_probability_and_per_day_ecmwf_checks(upstream, capsys, units):
+    def by_model(request):
+        secondary = fetch.ECMWF in str(request.url)
+        result = payload(days=2 if secondary else 3)
+        # One of three members is wet: the table should show 33%, not rain dots.
+        result["hourly"]["precipitation"] = [1.0] * len(result["hourly"]["time"])
+        if secondary:
+            # Agree on day 1, disagree on day 2, and omit day 3 entirely.
+            for key, values in result["hourly"].items():
+                if key.startswith("temperature_2m"):
+                    values[4:] = [value + 10 for value in values[4:]]
+        return httpx.Response(200, json=result)
+
+    upstream.forecast = by_model
+    assert cli.run(["02108", "--days", "3", "--units", units]) == 0
+    output = capsys.readouterr().out
+    rows = [line for line in output.splitlines() if "33%" in line]
+    assert len(rows) == 3
+    assert "Agrees" in rows[0]
+    assert "Differs" in rows[1]
+    assert "Unavailable" in rows[2]
+    assert "High" in rows[0]
+    assert "●" not in output
+    assert "20 percentage points" in output
+    assert ("2.2°C" if units == "metric" else "4°F") in output
+    assert ("≥1 mm" if units == "metric" else '≥0.04"') in output
+
+
+def test_ecmwf_failure_shows_unavailable_instead_of_disagreement(upstream, capsys):
+    def by_model(request):
+        if fetch.ECMWF in str(request.url):
+            return httpx.Response(404, json={"error": True, "reason": "model unavailable"})
+        return httpx.Response(200, json=payload(days=2))
+
+    upstream.forecast = by_model
+    assert cli.run(["02108", "--days", "2"]) == 0
+    output = capsys.readouterr().out
+    rows = [line for line in output.splitlines() if "0%" in line]
+    assert len(rows) == 2
+    assert all("Unavailable" in row and "Differs" not in row for row in rows)
+    assert "ECMWF cross-check unavailable" in output
+
+
+def test_disabled_ecmwf_omits_the_column_and_network_request(upstream, capsys):
+    assert cli.run(["02108", "--no-ecmwf", "--days", "2"]) == 0
+    output = capsys.readouterr().out
+    header = next(line for line in output.splitlines() if line.strip().startswith("Day "))
+    assert "Rain" in header and "Confidence" in header
+    assert "ECMWF" not in header
+    assert "Unavailable" not in output
+    assert "cross-check skipped" in output
+    assert not any(fetch.ECMWF in str(request.url) for request in upstream.requests)
+
+
+def test_all_wet_members_display_one_hundred_percent(upstream, capsys):
+    result = payload(days=1)
+    for key, values in result["hourly"].items():
+        if key.startswith("precipitation"):
+            result["hourly"][key] = [1.0] * len(values)
+    upstream.forecast = httpx.Response(200, json=result)
+    assert cli.run(["02108", "--days", "1"]) == 0
+    output = capsys.readouterr().out
+    assert "100%" in output

@@ -8,15 +8,15 @@ struct DurableCacheTests {
     func freshForecastSkipsRefresh() async throws {
         let root = cacheTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
-        let saved = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: fetchedAt)
-        try await WeatherOddsCache(rootDirectory: root).saveForecast(saved, for: zip, units: .imperial)
+        let saved = cacheTestForecast(locationID: locationID, location: cacheTestLocation(), fetchedAt: fetchedAt)
+        try await WeatherOddsCache(rootDirectory: root).saveForecast(saved, for: locationID, units: .imperial)
 
         for age: TimeInterval in [0, 60, 5 * 60 * 60, 6 * 60 * 60 - 1] {
             let cache = WeatherOddsCache(rootDirectory: root)
             let result = try await cache.loadOrRefreshForecast(
-                for: zip, units: .imperial, at: fetchedAt.addingTimeInterval(age)
+                for: locationID, units: .imperial, at: fetchedAt.addingTimeInterval(age)
             ) {
                 throw RefreshTestError.unexpectedRequest
             }
@@ -29,10 +29,10 @@ struct DurableCacheTests {
     func unusableForecastsRefresh() async throws {
         let root = cacheTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let cache = WeatherOddsCache(rootDirectory: root)
-        let refreshed = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+        let refreshed = cacheTestForecast(locationID: locationID, location: cacheTestLocation(), fetchedAt: now)
         let calls = RefreshCallCounter()
 
         for (age, day): (TimeInterval, String) in [
@@ -41,21 +41,21 @@ struct DurableCacheTests {
             (60, "2027-01-14"),
         ] {
             let saved = cacheTestForecast(
-                zip: zip, location: cacheTestLocation(),
+                locationID: locationID, location: cacheTestLocation(),
                 fetchedAt: now.addingTimeInterval(-age), day: day
             )
-            try await cache.saveForecast(saved, for: zip, units: .imperial)
-            let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            try await cache.saveForecast(saved, for: locationID, units: .imperial)
+            let result = try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                 await calls.increment()
                 return ForecastRefreshResult(refreshed)
             }
             #expect(result == refreshed)
-            #expect(await cache.loadForecast(for: zip, units: .imperial) == refreshed)
+            #expect(await cache.loadForecast(for: locationID, units: .imperial) == refreshed)
         }
         #expect(await calls.value == 3)
     }
 
-    @Test("Changing ZIP or units fetches the matching configuration; switching back reuses it")
+    @Test("Changing location or units fetches the matching configuration; switching back reuses it")
     func configurationChanges() async throws {
         let root = cacheTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -64,19 +64,19 @@ struct DurableCacheTests {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
 
         for (rawZip, units): (String, Units) in [
-            ("02108", .imperial), ("10001", .imperial), ("10001", .metric), ("02108", .imperial),
+            ("02108", .imperial), ("geonames:3078610", .imperial), ("geonames:3078610", .metric), ("02108", .imperial),
         ] {
-            let zip = try USZipCode(rawZip)
+            let locationID = try LocationID(rawZip)
             let forecast = cacheTestForecast(
-                zip: zip,
-                location: Location(zip: rawZip, displayName: rawZip, latitude: 40, longitude: -74),
+                locationID: locationID,
+                location: Location(id: locationID, displayName: rawZip, latitude: 40, longitude: -74),
                 fetchedAt: now, units: units
             )
-            let result = try await cache.loadOrRefreshForecast(for: zip, units: units, at: now) {
+            let result = try await cache.loadOrRefreshForecast(for: locationID, units: units, at: now) {
                 await calls.increment()
                 return ForecastRefreshResult(forecast)
             }
-            #expect(result.zip == rawZip)
+            #expect(result.locationID == rawZip)
             #expect(result.unitName == units.name)
         }
         #expect(await calls.value == 3)
@@ -88,14 +88,14 @@ struct DurableCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = WeatherOddsCache(rootDirectory: root)
         let calls = RefreshCallCounter()
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let forecast = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+        let forecast = cacheTestForecast(locationID: locationID, location: cacheTestLocation(), fetchedAt: now)
 
         try await withThrowingTaskGroup(of: CachedForecast.self) { group in
             for _ in 0..<10 {
                 group.addTask {
-                    try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+                    try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                         await calls.increment()
                         try await Task.sleep(for: .milliseconds(50))
                         return ForecastRefreshResult(forecast)
@@ -112,28 +112,28 @@ struct DurableCacheTests {
         let root = cacheTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let cache = WeatherOddsCache(rootDirectory: root, retryPolicy: RetryPolicy(jitter: { 0 }))
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let stale = cacheTestForecast(
-            zip: zip, location: cacheTestLocation(), fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
+            locationID: locationID, location: cacheTestLocation(), fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
         )
-        try await cache.saveForecast(stale, for: zip, units: .imperial)
+        try await cache.saveForecast(stale, for: locationID, units: .imperial)
 
         let failure = await #expect(throws: ForecastUnavailable.self) {
-            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                 throw RefreshTestError.unexpectedRequest
             }
         }
         #expect(failure?.reason == .transient)
         #expect(failure?.nextAttempt == now.addingTimeInterval(RetryPolicy.baseDelay))
-        #expect(await cache.loadForecast(for: zip, units: .imperial) == stale)
+        #expect(await cache.loadForecast(for: locationID, units: .imperial) == stale)
 
         let retryAt = try #require(failure?.nextAttempt)
         let refreshed = cacheTestForecast(
-            zip: zip, location: cacheTestLocation(), fetchedAt: retryAt
+            locationID: locationID, location: cacheTestLocation(), fetchedAt: retryAt
         )
         let result = try await cache.loadOrRefreshForecast(
-            for: zip, units: .imperial, at: retryAt
+            for: locationID, units: .imperial, at: retryAt
         ) {
             ForecastRefreshResult(refreshed)
         }
@@ -147,12 +147,12 @@ struct DurableCacheTests {
         let cache = WeatherOddsCache(rootDirectory: root)
         let calls = RefreshCallCounter()
         let gate = RefreshTestGate()
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let forecast = cacheTestForecast(zip: zip, location: cacheTestLocation(), fetchedAt: now)
+        let forecast = cacheTestForecast(locationID: locationID, location: cacheTestLocation(), fetchedAt: now)
 
         let first = Task {
-            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                 await calls.increment()
                 await gate.wait()
                 try Task.checkCancellation()
@@ -162,7 +162,7 @@ struct DurableCacheTests {
         await gate.waitUntilStarted()
         first.cancel()
         let second = Task {
-            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                 await calls.increment()
                 return ForecastRefreshResult(forecast)
             }
@@ -172,7 +172,7 @@ struct DurableCacheTests {
         await #expect(throws: CancellationError.self) { try await first.value }
         #expect(try await second.value == forecast)
         #expect(await calls.value == 1)
-        #expect(await cache.loadForecast(for: zip, units: .imperial) == forecast)
+        #expect(await cache.loadForecast(for: locationID, units: .imperial) == forecast)
     }
 
     @Test("Location and forecast entries round-trip under configuration keys")
@@ -181,23 +181,23 @@ struct DurableCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let cache = WeatherOddsCache(rootDirectory: root)
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let location = cacheTestLocation()
-        let forecast = cacheTestForecast(zip: zip, location: location)
+        let forecast = cacheTestForecast(locationID: locationID, location: location)
 
-        try await cache.saveLocation(location, for: zip)
-        try await cache.saveForecast(forecast, for: zip, units: .imperial)
+        try await cache.saveLocation(location, for: locationID)
+        try await cache.saveForecast(forecast, for: locationID, units: .imperial)
 
-        let loadedLocation = await cache.loadLocation(for: zip)
-        let loadedForecast = await cache.loadForecast(for: zip, units: .imperial)
-        let wrongUnits = await cache.loadForecast(for: zip, units: .metric)
+        let loadedLocation = await cache.loadLocation(for: locationID)
+        let loadedForecast = await cache.loadForecast(for: locationID, units: .imperial)
+        let wrongUnits = await cache.loadForecast(for: locationID, units: .metric)
 
-        #expect(loadedLocation == CachedLocation(zip: zip.rawValue, location: location))
+        #expect(loadedLocation == CachedLocation(locationID: locationID.rawValue, location: location))
         #expect(loadedForecast == forecast)
         #expect(wrongUnits == nil)
-        #expect(cache.locationURL(for: zip).lastPathComponent == "02108-location-v1.json")
+        #expect(cache.locationURL(for: locationID).lastPathComponent == "02108-location-v1.json")
         #expect(
-            cache.forecastURL(for: zip, units: .imperial).lastPathComponent
+            cache.forecastURL(for: locationID, units: .imperial).lastPathComponent
                 == "02108-imperial-forecast-v1.json"
         )
     }
@@ -208,25 +208,25 @@ struct DurableCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let cache = WeatherOddsCache(rootDirectory: root)
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let url = cache.locationURL(for: zip)
+        let url = cache.locationURL(for: locationID)
 
         try Data("not json".utf8).write(to: url)
-        let corrupt = await cache.loadLocation(for: zip)
+        let corrupt = await cache.loadLocation(for: locationID)
         #expect(corrupt == nil)
 
         let future = CachedLocation(
             schemaVersion: CachedLocation.currentSchemaVersion + 1,
-            zip: zip.rawValue,
+            locationID: locationID.rawValue,
             location: cacheTestLocation()
         )
         try JSONEncoder().encode(future).write(to: url)
-        let unknownSchema = await cache.loadLocation(for: zip)
+        let unknownSchema = await cache.loadLocation(for: locationID)
         #expect(unknownSchema == nil)
 
         let mismatch = CachedLocation(
-            zip: "10001",
+            locationID: "10001",
             location: Location(
                 zip: "10001",
                 displayName: "New York, NY",
@@ -235,7 +235,7 @@ struct DurableCacheTests {
             )
         )
         try JSONEncoder().encode(mismatch).write(to: url)
-        let wrongKey = await cache.loadLocation(for: zip)
+        let wrongKey = await cache.loadLocation(for: locationID)
         #expect(wrongKey == nil)
     }
 
@@ -245,9 +245,9 @@ struct DurableCacheTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let cache = WeatherOddsCache(rootDirectory: root)
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let location = cacheTestLocation()
-        try await cache.saveLocation(location, for: zip)
+        try await cache.saveLocation(location, for: locationID)
 
         do {
             try await cache.saveLocation(
@@ -257,35 +257,35 @@ struct DurableCacheTests {
                     latitude: 40.75,
                     longitude: -73.99
                 ),
-                for: zip
+                for: locationID
             )
             Issue.record("Expected a key mismatch")
         } catch {
             #expect(error as? CacheError == .keyMismatch)
         }
 
-        let stillCached = await cache.loadLocation(for: zip)
+        let stillCached = await cache.loadLocation(for: locationID)
         #expect(stillCached?.location == location)
     }
 
     @Test("Fallbacks require both freshness and a current-or-future day")
     func fallbackUsability() throws {
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let fresh = cacheTestForecast(
-            zip: zip,
+            locationID: locationID,
             location: cacheTestLocation(),
             fetchedAt: now.addingTimeInterval(-47 * 60 * 60),
             day: "2027-01-16"
         )
         let expired = cacheTestForecast(
-            zip: zip,
+            locationID: locationID,
             location: cacheTestLocation(),
             fetchedAt: now.addingTimeInterval(-48 * 60 * 60),
             day: "2027-01-16"
         )
         let onlyPastDays = cacheTestForecast(
-            zip: zip,
+            locationID: locationID,
             location: cacheTestLocation(),
             fetchedAt: now,
             day: "2027-01-14"
@@ -298,9 +298,9 @@ struct DurableCacheTests {
 
     @Test("Local date falls back to the fixed UTC offset")
     func localDateFallback() throws {
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let forecast = CachedForecast(
-            zip: zip,
+            locationID: locationID,
             units: .imperial,
             location: cacheTestLocation(),
             timeZoneIdentifier: "not/a-timezone",
@@ -312,6 +312,46 @@ struct DurableCacheTests {
 
         #expect(forecast.currentLocalDate(at: Date(timeIntervalSince1970: 0)) == "1969-12-31")
     }
+    @Test("Legacy forecast files survive migration and can restore a missing location file")
+    func legacyForecastMigration() async throws {
+        let root = cacheTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cache = WeatherOddsCache(rootDirectory: root)
+        let id = try LocationID("02108")
+        let forecast = cacheTestForecast(locationID: id, location: cacheTestLocation())
+        try await cache.saveForecast(forecast, for: id, units: .imperial)
+        let url = cache.forecastURL(for: id, units: .imperial)
+        var document = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(document["zip"] as? String == "02108")
+        var location = try #require(document["location"] as? [String: Any])
+        location.removeValue(forKey: "id")
+        location.removeValue(forKey: "countryCode")
+        location.removeValue(forKey: "postalCode")
+        location["zip"] = "02108"
+        document["location"] = location
+        try JSONSerialization.data(withJSONObject: document).write(to: url)
+        let restored = WeatherOddsCache(rootDirectory: root)
+        #expect(await restored.loadForecast(for: id, units: .imperial) == forecast)
+        // No standalone geocode file exists; restoration must use the forecast.
+        let search = LocationSearch(cache: restored)
+        #expect(try await search.location(for: id) == forecast.location)
+        #expect(await restored.loadLocation(for: id)?.location == forecast.location)
+    }
+
+    @Test("Prague day boundaries follow DST even when the cached offset is stale")
+    func pragueDST() throws {
+        let id = try LocationID("geonames:3078610")
+        let place = Location(id: id, displayName: "Brno, Czechia", latitude: 49.19522, longitude: 16.60796)
+        let forecast = CachedForecast(
+            locationID: id, units: .metric, location: place,
+            timeZoneIdentifier: "Europe/Prague", utcOffsetSeconds: 3600,
+            fetchedAt: .now, summaries: [], ecmwfContributed: true
+        )
+        let formatter = ISO8601DateFormatter()
+        #expect(forecast.currentLocalDate(at: try #require(formatter.date(from: "2026-03-29T22:30:00Z"))) == "2026-03-30")
+        #expect(forecast.currentLocalDate(at: try #require(formatter.date(from: "2026-10-25T22:30:00Z"))) == "2026-10-25")
+    }
+
 }
 
 private func cacheTestRoot() -> URL {
@@ -331,14 +371,14 @@ private func cacheTestLocation() -> Location {
 }
 
 private func cacheTestForecast(
-    zip: USZipCode,
+    locationID: LocationID,
     location: Location,
     fetchedAt: Date = Date(timeIntervalSince1970: 1_800_000_000),
     day: String = "2027-01-15",
     units: Units = .imperial
 ) -> CachedForecast {
     CachedForecast(
-        zip: zip,
+        locationID: locationID,
         units: units,
         location: location,
         timeZoneIdentifier: "America/New_York",

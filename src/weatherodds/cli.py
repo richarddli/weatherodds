@@ -25,15 +25,28 @@ def _days(value: str) -> int:
     return days
 
 
+def _location_id(value: str) -> int:
+    if not value.isascii() or not value.isdigit() or int(value) <= 0:
+        raise argparse.ArgumentTypeError("--location-id must be a positive GeoNames ID")
+    return int(value)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="weatherodds",
         description=(
-            "15-day ensemble forecast for a US zip code, summarizing Google "
+            "15-day ensemble forecast for a city or postal code, summarizing Google "
             "DeepMind's WeatherNext 2 ensemble (via the free Open-Meteo API)."
         ),
     )
-    parser.add_argument("zip", help="5-digit US zip code, e.g. 02108")
+    location = parser.add_mutually_exclusive_group(required=True)
+    location.add_argument(
+        "location", nargs="?", help='city or postal code, e.g. "Brno, Czech Republic" or 02108'
+    )
+    location.add_argument(
+        "--location-id", type=_location_id, help="select a GeoNames ID from search results"
+    )
+    parser.add_argument("--country", metavar="CODE", help="two-letter country code, e.g. CZ")
     parser.add_argument(
         "--days", type=_days, default=15, metavar="N", help="forecast days, 1-15 (default 15)"
     )
@@ -98,18 +111,28 @@ def run(argv: list[str] | None = None) -> int:
     units = summarize.UNITS[args.units]
     stderr = Console(stderr=True, highlight=False)
 
-    try:
-        location = geocode.lookup(args.zip)
-    except geocode.GeocodeError as exc:
-        stderr.print(f"error: {exc}", style="red")
-        return 1
-
     session = fetch.Session(
         client=httpx.Client(headers={"User-Agent": "weatherodds/0.1"}),
         cache=cache_mod.ForecastCache(),
     )
     ecmwf_note: str | None = None
     with session.client:
+        try:
+            location = geocode.resolve(
+                args.location, session=session, country=args.country, location_id=args.location_id
+            )
+        except fetch.CooldownError as exc:
+            now = dt.datetime.now().astimezone()
+            stderr.print(
+                f"error: {exc}. Next attempt at "
+                f"{_format_deadline(exc.next_attempt, now.tzinfo, now)}.",
+                style="red", markup=False,
+            )
+            return 1
+        except (geocode.GeocodeError, fetch.FetchError) as exc:
+            stderr.print(f"error: location lookup failed: {exc}", style="red", markup=False)
+            return 1
+
         try:
             primary = session.ensemble(
                 fetch.WEATHERNEXT,
@@ -191,6 +214,7 @@ def run(argv: list[str] | None = None) -> int:
         members=days[0].members_total,
         model_run=primary.run_time,
         ecmwf_used=secondary is not None,
+        ecmwf_enabled=not args.no_ecmwf,
         ecmwf_members=ecmwf_members,
         ecmwf_run=secondary.run_time if secondary else None,
         ecmwf_note=ecmwf_note,

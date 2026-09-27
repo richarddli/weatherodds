@@ -194,7 +194,7 @@ extension ForecastUnavailable: LocalizedError {
     public var errorDescription: String? {
         switch reason {
         case .cooldown:
-            "Forecast refresh is waiting for its next permitted attempt."
+            message ?? "Forecast refresh is waiting for its next permitted attempt."
         case .rateLimited:
             "The forecast service asked callers to slow down."
         case .transient:

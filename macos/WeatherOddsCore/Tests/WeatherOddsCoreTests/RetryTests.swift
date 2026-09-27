@@ -136,9 +136,9 @@ struct RetryCooldownTests {
     func cooldownSurvivesRestart() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
 
-        let first = await timedOutRefresh(retryTestCache(root), zip: zip, at: now)
+        let first = await timedOutRefresh(retryTestCache(root), locationID: locationID, at: now)
         let deadline = try #require(first?.nextAttempt)
         #expect(deadline == now.addingTimeInterval(RetryPolicy.baseDelay))
 
@@ -147,15 +147,15 @@ struct RetryCooldownTests {
         for offset: TimeInterval in [0, 60, RetryPolicy.baseDelay - 1] {
             let cache = retryTestCache(root)
             let at = now.addingTimeInterval(offset)
-            #expect(await cache.nextEligibleAttempt(for: zip, units: .imperial, at: at) == deadline)
-            let blocked = await suppressedRefresh(cache, zip: zip, at: at)
+            #expect(await cache.nextEligibleAttempt(for: locationID, units: .imperial, at: at) == deadline)
+            let blocked = await suppressedRefresh(cache, locationID: locationID, at: at)
             #expect(blocked?.reason == .cooldown)
             #expect(blocked?.nextAttempt == deadline)
         }
 
         #expect(
             await retryTestCache(root)
-                .nextEligibleAttempt(for: zip, units: .imperial, at: deadline) == nil
+                .nextEligibleAttempt(for: locationID, units: .imperial, at: deadline) == nil
         )
     }
 
@@ -163,29 +163,29 @@ struct RetryCooldownTests {
     func backoffGrowsAndResets() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let cache = retryTestCache(root)
         var at = now
         let expected: [TimeInterval] = [30 * 60, 60 * 60, 2 * 60 * 60, 4 * 60 * 60]
 
         for (index, delay) in expected.enumerated() {
-            let failure = await timedOutRefresh(cache, zip: zip, at: at)
+            let failure = await timedOutRefresh(cache, locationID: locationID, at: at)
             #expect(failure?.consecutiveFailures == index + 1)
             #expect(failure?.nextAttempt == at.addingTimeInterval(delay))
             at = try #require(failure?.nextAttempt)
         }
 
-        let recovered = retryTestForecast(zip: zip, fetchedAt: at)
-        let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: at) {
+        let recovered = retryTestForecast(locationID: locationID, fetchedAt: at)
+        let result = try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: at) {
             ForecastRefreshResult(recovered)
         }
         #expect(result == recovered)
-        #expect(await cache.retryState(for: zip, units: .imperial) == nil)
-        #expect(await cache.nextEligibleAttempt(for: zip, units: .imperial, at: at) == nil)
+        #expect(await cache.retryState(for: locationID, units: .imperial) == nil)
+        #expect(await cache.nextEligibleAttempt(for: locationID, units: .imperial, at: at) == nil)
 
         // The next failure starts over at the base delay.
         let after = at.addingTimeInterval(CachedForecast.refreshInterval)
-        let restarted = await timedOutRefresh(cache, zip: zip, at: after)
+        let restarted = await timedOutRefresh(cache, locationID: locationID, at: after)
         #expect(restarted?.consecutiveFailures == 1)
         #expect(restarted?.nextAttempt == after.addingTimeInterval(RetryPolicy.baseDelay))
     }
@@ -194,8 +194,8 @@ struct RetryCooldownTests {
     func rateLimitAppliesAcrossConfigurations() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let boston = try USZipCode("02108")
-        let newYork = try USZipCode("10001")
+        let boston = try LocationID("02108")
+        let newYork = try LocationID("10001")
 
         let limited = await #expect(throws: ForecastUnavailable.self) {
             try await retryTestCache(root).loadOrRefreshForecast(
@@ -215,13 +215,13 @@ struct RetryCooldownTests {
 
         // A different ZIP and a different unit choice share the same upstream
         // quota, so neither may bypass the cooldown.
-        for (zip, units) in [(newYork, Units.imperial), (boston, .metric), (newYork, .metric)] {
+        for (locationID, units) in [(newYork, Units.imperial), (boston, .metric), (newYork, .metric)] {
             let cache = retryTestCache(root)
             #expect(
-                await cache.nextEligibleAttempt(for: zip, units: units, at: now)
+                await cache.nextEligibleAttempt(for: locationID, units: units, at: now)
                     == now.addingTimeInterval(900)
             )
-            let blocked = await suppressedRefresh(cache, zip: zip, units: units, at: now)
+            let blocked = await suppressedRefresh(cache, locationID: locationID, units: units, at: now)
             #expect(blocked?.reason == .cooldown)
             // The count belongs to the record that imposed the deadline, so a
             // configuration that has never failed still reports the shared one.
@@ -230,7 +230,7 @@ struct RetryCooldownTests {
 
         // Recovery on one configuration clears the shared cooldown.
         let at = now.addingTimeInterval(900)
-        let forecast = retryTestForecast(zip: newYork, fetchedAt: at)
+        let forecast = retryTestForecast(locationID: newYork, fetchedAt: at)
         _ = try await retryTestCache(root).loadOrRefreshForecast(
             for: newYork, units: .imperial, at: at
         ) {
@@ -246,8 +246,8 @@ struct RetryCooldownTests {
     func optionalModelRateLimitIsRecorded() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
-        let other = try USZipCode("10001")
+        let locationID = try LocationID("02108")
+        let other = try LocationID("10001")
         let cache = retryTestCache(root)
         let refresher = ForecastRefresher(client: EnsembleClient(loader: RetryTestLoader(
             responses: [
@@ -261,25 +261,25 @@ struct RetryCooldownTests {
         )))
 
         let forecast = try await cache.loadOrRefreshForecast(
-            for: zip, units: .imperial, at: now
+            for: locationID, units: .imperial, at: now
         ) {
             try await refresher.refresh(
-                for: zip, location: retryTestLocation(), units: .imperial, at: self.now
+                for: locationID, location: retryTestLocation(), units: .imperial, at: self.now
             )
         }
 
         // The secondary model's failure degrades the forecast, never fails it.
         #expect(!forecast.summaries.isEmpty)
         #expect(forecast.ecmwfContributed == false)
-        #expect(await cache.loadForecast(for: zip, units: .imperial) == forecast)
+        #expect(await cache.loadForecast(for: locationID, units: .imperial) == forecast)
 
         // The primary succeeded, so only the shared rate limit survives.
-        #expect(await cache.retryState(for: zip, units: .imperial) == nil)
+        #expect(await cache.retryState(for: locationID, units: .imperial) == nil)
         let deadline = now.addingTimeInterval(1800)
         #expect(
             await cache.nextEligibleAttempt(for: other, units: .metric, at: now) == deadline
         )
-        let blocked = await suppressedRefresh(cache, zip: other, units: .metric, at: now)
+        let blocked = await suppressedRefresh(cache, locationID: other, units: .metric, at: now)
         #expect(blocked?.nextAttempt == deadline)
     }
 
@@ -287,7 +287,7 @@ struct RetryCooldownTests {
     func optionalModelTransientFailureIsNotRecorded() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let cache = retryTestCache(root)
         let refresher = ForecastRefresher(client: EnsembleClient(loader: RetryTestLoader(
             responses: [
@@ -297,39 +297,39 @@ struct RetryCooldownTests {
         )))
 
         let forecast = try await cache.loadOrRefreshForecast(
-            for: zip, units: .imperial, at: now
+            for: locationID, units: .imperial, at: now
         ) {
             try await refresher.refresh(
-                for: zip, location: retryTestLocation(), units: .imperial, at: self.now
+                for: locationID, location: retryTestLocation(), units: .imperial, at: self.now
             )
         }
 
         #expect(forecast.ecmwfContributed == false)
-        #expect(await cache.nextEligibleAttempt(for: zip, units: .imperial, at: now) == nil)
+        #expect(await cache.nextEligibleAttempt(for: locationID, units: .imperial, at: now) == nil)
     }
 
     @Test("Cancellation records no cooldown and leaves the cache untouched")
     func cancellationIsNotAFailure() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let cache = retryTestCache(root)
         let stale = retryTestForecast(
-            zip: zip, fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
+            locationID: locationID, fetchedAt: now.addingTimeInterval(-7 * 60 * 60)
         )
-        try await cache.saveForecast(stale, for: zip, units: .imperial)
+        try await cache.saveForecast(stale, for: locationID, units: .imperial)
 
         await #expect(throws: CancellationError.self) {
-            try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+            try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
                 throw CancellationError()
             }
         }
 
-        #expect(await cache.retryState(for: zip, units: .imperial) == nil)
+        #expect(await cache.retryState(for: locationID, units: .imperial) == nil)
         #expect(await cache.retryState(forKey: WeatherOddsCache.rateLimitKey) == nil)
-        #expect(await cache.nextEligibleAttempt(for: zip, units: .imperial, at: now) == nil)
+        #expect(await cache.nextEligibleAttempt(for: locationID, units: .imperial, at: now) == nil)
         // Usable stale data stays available for the failure timeline to show.
-        #expect(await cache.loadForecast(for: zip, units: .imperial) == stale)
+        #expect(await cache.loadForecast(for: locationID, units: .imperial) == stale)
         #expect(stale.isUsableFallback(at: now, currentLocalDate: "2027-01-15"))
     }
 
@@ -337,14 +337,14 @@ struct RetryCooldownTests {
     func freshForecastOutranksCooldown() async throws {
         let root = retryTestRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let zip = try USZipCode("02108")
+        let locationID = try LocationID("02108")
         let cache = retryTestCache(root)
-        let fresh = retryTestForecast(zip: zip, fetchedAt: now)
-        try await cache.saveForecast(fresh, for: zip, units: .imperial)
+        let fresh = retryTestForecast(locationID: locationID, fetchedAt: now)
+        try await cache.saveForecast(fresh, for: locationID, units: .imperial)
 
         _ = await #expect(throws: ForecastUnavailable.self) {
             try await cache.loadOrRefreshForecast(
-                for: try USZipCode("10001"), units: .imperial, at: now
+                for: try LocationID("10001"), units: .imperial, at: now
             ) {
                 throw FetchError.httpFailure(
                     model: weatherNextModel,
@@ -353,7 +353,7 @@ struct RetryCooldownTests {
             }
         }
 
-        let result = try await cache.loadOrRefreshForecast(for: zip, units: .imperial, at: now) {
+        let result = try await cache.loadOrRefreshForecast(for: locationID, units: .imperial, at: now) {
             Issue.record("A fresh forecast needs no request")
             throw RetryTestError.unexpectedRequest
         }
@@ -366,12 +366,12 @@ struct RetryCooldownTests {
 /// does not have to solve the nested closures at every use site.
 private func timedOutRefresh(
     _ cache: WeatherOddsCache,
-    zip: USZipCode,
+    locationID: LocationID,
     units: Units = .imperial,
     at now: Date
 ) async -> ForecastUnavailable? {
     await #expect(throws: ForecastUnavailable.self) {
-        try await cache.loadOrRefreshForecast(for: zip, units: units, at: now) {
+        try await cache.loadOrRefreshForecast(for: locationID, units: units, at: now) {
             throw FetchError.requestFailed(model: weatherNextModel, code: .timedOut)
         }
     }
@@ -380,12 +380,12 @@ private func timedOutRefresh(
 /// Asserts a request is suppressed by a durable cooldown rather than issued.
 private func suppressedRefresh(
     _ cache: WeatherOddsCache,
-    zip: USZipCode,
+    locationID: LocationID,
     units: Units = .imperial,
     at now: Date
 ) async -> ForecastUnavailable? {
     await #expect(throws: ForecastUnavailable.self) {
-        try await cache.loadOrRefreshForecast(for: zip, units: units, at: now) {
+        try await cache.loadOrRefreshForecast(for: locationID, units: units, at: now) {
             Issue.record("A cooldown must not permit another request")
             throw RetryTestError.unexpectedRequest
         }
@@ -415,13 +415,13 @@ private func retryTestLocation() -> Location {
     )
 }
 
-private func retryTestForecast(zip: USZipCode, fetchedAt: Date) -> CachedForecast {
+private func retryTestForecast(locationID: LocationID, fetchedAt: Date) -> CachedForecast {
     CachedForecast(
-        zip: zip,
+        locationID: locationID,
         units: .imperial,
         location: Location(
-            zip: zip.rawValue,
-            displayName: zip.rawValue,
+            zip: locationID.rawValue,
+            displayName: locationID.rawValue,
             latitude: 42,
             longitude: -71,
             timeZoneIdentifier: "America/New_York",
@@ -525,7 +525,7 @@ struct ForecastRefresherTests {
 
         let error = await #expect(throws: FetchError.self) {
             try await refresher.refresh(
-                for: try USZipCode("02108"),
+                for: try LocationID("02108"),
                 location: retryTestLocation(),
                 units: .imperial,
                 at: self.now
@@ -546,7 +546,7 @@ struct ForecastRefresherTests {
 
         let error = await #expect(throws: FetchError.self) {
             try await refresher.refresh(
-                for: try USZipCode("02108"),
+                for: try LocationID("02108"),
                 location: retryTestLocation(),
                 units: .imperial,
                 at: self.now
@@ -568,7 +568,7 @@ struct ForecastRefresherTests {
         )))
 
         let result = try await refresher.refresh(
-            for: try USZipCode("02108"),
+            for: try LocationID("02108"),
             location: retryTestLocation(),
             units: .imperial,
             at: now

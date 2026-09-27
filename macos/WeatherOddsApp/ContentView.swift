@@ -19,12 +19,12 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 14) {
                 instruction(1, "Control-click the desktop and choose Edit Widgets.")
                 instruction(2, "Find Weather Odds and add the size you prefer.")
-                instruction(3, "Control-click the widget, choose Edit, and enter a US zip code.")
+                instruction(3, "Control-click the widget, choose Edit, and search for a city or postal code.")
             }
 
             Divider()
 
-            Text("Each widget has its own zip code and unit setting, so you can watch more than one city.")
+            Text("Search for places such as Brno, Czech Republic or Boston, MA. Each widget has its own location and units, so you can watch cities around the world.")
                 .fixedSize(horizontal: false, vertical: true)
 
             Link("Forecast data via Open-Meteo", destination: URL(string: "https://open-meteo.com")!)

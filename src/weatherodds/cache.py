@@ -38,6 +38,7 @@ MAX_FALLBACK_AGE = 48 * 60 * 60
 # actually refetched; this window only suppresses repeats across back-to-back
 # invocations for different locations.
 RUN_TIME_FRESHNESS = 60 * 60
+GEOCODING_FRESHNESS = 30 * 24 * 60 * 60
 
 # Rate limiting is a property of the caller, not of one location or model, so
 # every request shares one cooldown key.
@@ -210,6 +211,26 @@ class ForecastCache:
                 "payload": payload,
             },
             compressed=True,
+        )
+
+    # -------------------------------------------------------------- geocoding
+
+    def load_geocoding(self, key: str, *, now: float) -> dict | None:
+        data = self._read(f"geocoding-{_UNSAFE.sub('_', key)}-v1.json")
+        if not isinstance(data, dict) or data.get("key") != key:
+            return None
+        fetched_at = data.get("fetched_at")
+        if type(fetched_at) not in (int, float):
+            return None
+        if not fetched_at <= now < fetched_at + GEOCODING_FRESHNESS:
+            return None
+        payload = data.get("payload")
+        return payload if isinstance(payload, dict) else None
+
+    def store_geocoding(self, key: str, payload: dict, *, now: float) -> None:
+        self._write(
+            f"geocoding-{_UNSAFE.sub('_', key)}-v1.json",
+            {"key": key, "fetched_at": now, "payload": payload},
         )
 
     # -------------------------------------------------------------- run time
