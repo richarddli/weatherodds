@@ -178,10 +178,13 @@ bash scripts/verify-macos.sh
 ```
 
 The verification script and CI build without signing in
-`tmp/macos-verification`, removing the build's Launch Services registration
-on exit. Always use a separate `-derivedDataPath` for unsigned builds: using
-Xcode's default output can overwrite a running signed widget and prevent macOS
-from loading it.
+`tmp/macos-verification` under the separate bundle ID
+`com.polarsky.weatherodds.verification`, removing the build's Launch Services
+registration on exit. Unregistering a build that shares the installed app's
+bundle ID also removes the installed widget's App Intents metadata, which
+leaves it unable to refresh. Always use a separate `-derivedDataPath` for
+unsigned builds: using Xcode's default output can overwrite a running signed
+widget and prevent macOS from loading it.
 The installer uses `tmp/macos-install` and verifies its signed output before
 replacing the installed app.
 
